@@ -553,12 +553,14 @@ class CopyObjects(Action):
                    "Environment-specific settings are kept unless you name them.")
     inverse = "object.restore"
     source_connection = True
+    hidden = True  # driven from the Copy and Compare pages, not from an uploaded file
     columns = [
         Column("object_type", True, "access_profile, role, governance_group or source.", "access_profile"),
         Column("object", True, "Name or ID of the object in the environment you copy FROM.", "Finance - Read"),
         Column("target_name", False, "Name in this environment, when it differs. Blank = the same name.", ""),
-        Column("attributes", False, "Attributes to copy to objects that already exist here, separated by ';'. "
-               "Blank = all except environment-specific ones (members, cluster, connection settings). For sources, "
+        Column("attributes", False, "Attributes to copy, separated by ';'. Blank = all except environment-specific "
+               "ones (members, cluster, connection settings). New objects always get the attributes they cannot be "
+               "created without. For sources, "
                "connector settings are named config.<setting>, e.g. config.pageSize.", "description;owner"),
         Column("keep", False, "Attributes to leave exactly as they are here, separated by ';' — also for new "
                "objects.", "requestable"),
@@ -640,7 +642,7 @@ class CopyObjects(Action):
             m.append(msg("error", f"{label} '{name}' does not exist here (option: when missing → error)", "object",
                          "missing"))
             return Plan("error", name, None, m)
-        return self._plan_create(ctx, mapper, type_, name, src, specs, keep, overrides, m, source_ref)
+        return self._plan_create(ctx, mapper, type_, name, src, specs, row, keep, overrides, m, source_ref)
 
     @staticmethod
     def _names(type_, text, specs, column, m):
@@ -767,16 +769,22 @@ class CopyObjects(Action):
                    "before": {f: value_of(current, f) for f in changes}, "after": changes, "labels": labels}
         return Plan("update", current["name"], payload, m)
 
-    def _plan_create(self, ctx, mapper, type_, name, src, specs, keep, overrides, m, source_ref):
+    def _plan_create(self, ctx, mapper, type_, name, src, specs, row, keep, overrides, m, source_ref):
         label = model.TYPE_LABELS[type_]
-        chosen = [a for a in dict.fromkeys(default_selection(specs) + list(overrides)) if a not in keep]
+        if row.get("attributes"):  # the chosen attributes, plus the ones the object cannot be created without
+            picked = self._names(type_, row["attributes"], specs, "attributes", m)
+            chosen = picked + [a.name for a in specs.values() if a.required and a.name not in picked]
+        else:
+            chosen = default_selection(specs)
+        chosen = [a for a in dict.fromkeys(chosen + list(overrides)) if a not in keep]
         for spec in specs.values():
             if spec.required and spec.name in keep:
                 m.append(msg("error", f"{spec.label} is required to create the {label.lower()}; it cannot be kept",
                              "keep", "required"))
         if type_ == "source" and src.get("cluster") and "cluster" not in chosen:
             m.append(msg("error", "The source runs on a virtual appliance cluster, which differs per environment. "
-                                  "Add overrides cluster=<cluster name here>.", "overrides", "cluster_required"))
+                                  "Choose the cluster to use here (overrides: cluster=<cluster name>).", "overrides",
+                         "cluster_required"))
         values = self._values(ctx, mapper, type_, src, chosen, overrides)
         source = None
         if type_ == "access_profile":
@@ -788,7 +796,7 @@ class CopyObjects(Action):
             if not values["connector"]:
                 mapper.error("The source's connector type could not be read")
             missing = [spec.label for spec in specs.values() if spec.kind == "config" and spec.env_specific
-                       and spec.name not in overrides]
+                       and spec.name not in chosen]
             if missing:
                 m.append(msg("warning", f"Connection settings left empty (they differ per environment): "
                                         f"{', '.join(missing)}. Add them with overrides, or set them here after "

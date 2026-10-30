@@ -10,7 +10,7 @@ import logging
 import threading
 from collections import OrderedDict
 
-from .actions.copy import COPY_TYPES, attr_specs
+from .actions.copy import COPY_TYPES, attr_specs, find_by_name
 from .connectors import model
 from .connectors.base import ConnectorError, Interrupted
 from .reports import MAX_PER_TYPE
@@ -136,35 +136,74 @@ class CompareRunner:
                 self._aborts.pop(result["id"], None)
 
     def _row(self, src, dst, type_, src_objs, dst_objs, src_groups, dst_groups, abort):
-        s = src_objs[0]
-        row = {"name": s["name"], "source_id": s["id"], "target_id": None, "status": "new", "diffs": [], "secrets": []}
         if len(src_objs) > 1 or len(dst_objs) > 1:
-            row.update(status="ambiguous", problem="The name is used by more than one object; copy it by ID")
-            return row
-        d = dst_objs[0] if dst_objs else None
-        specs = attr_specs(type_, s)
+            s = src_objs[0]
+            return {"name": s["name"], "source_id": s["id"], "target_id": None, "status": "ambiguous", "diffs": [],
+                    "secrets": [], "problem": "The name is used by more than one object; copy it by ID"}
+        if abort.is_set():
+            raise Interrupted()
+        return object_row(src, dst, type_, src_objs[0], dst_objs[0] if dst_objs else None, src_groups, dst_groups)
+
+
+def object_row(src, dst, type_, s, d, src_groups, dst_groups, include_same=False):
+    """One object compared across two environments. Lists the differing attributes, or with include_same
+    every copyable attribute, each with "same" telling whether the values already match."""
+    row = {"name": s["name"], "source_id": s["id"], "target_id": None, "status": "new", "diffs": [], "secrets": []}
+    specs = attr_specs(type_, s)
+    if d is not None:
+        row["target_id"] = d["id"]
+        for key in (d.get("config") or {}):
+            specs.setdefault(f"config.{key}", attr_specs(type_, d)[f"config.{key}"])
+    src_members = dst_members = None
+    if type_ == "governance_group" and (d is not None or include_same):
+        src_members = [m.get("name") or m["id"] for m in src.list_governance_group_members(s["id"])]
         if d is not None:
-            row["target_id"] = d["id"]
-            for key in (d.get("config") or {}):
-                specs.setdefault(f"config.{key}", attr_specs(type_, d)[f"config.{key}"])
-        src_members = dst_members = None
-        if type_ == "governance_group" and d is not None:
-            if abort.is_set():
-                raise Interrupted()
-            src_members = [m.get("name") or m["id"] for m in src.list_governance_group_members(s["id"])]
             dst_members = [m.get("name") or m["id"] for m in dst.list_governance_group_members(d["id"])]
-        for spec in specs.values():
-            a = comparable(spec, s, src_groups, src_members)
-            b = comparable(spec, d, dst_groups, dst_members) if d is not None else None
-            if spec.secret:
-                row["secrets"].append(spec.label)
-                continue
-            if (d is not None and _same(a, b)) or (spec.kind == "members" and src_members is None):
-                continue
-            row["diffs"].append({"attr": spec.name, "label": spec.label, "source": a, "target": b,
-                                 "env_specific": spec.env_specific,
-                                 "only_in_target": spec.name.startswith("config.") and
-                                 spec.label not in (s.get("config") or {})})
-        if d is not None:
-            row["status"] = "different" if row["diffs"] else "same"
-        return row
+    for spec in specs.values():
+        a = comparable(spec, s, src_groups, src_members)
+        b = comparable(spec, d, dst_groups, dst_members) if d is not None else None
+        if spec.secret:
+            row["secrets"].append(spec.label)
+            continue
+        if spec.kind == "members" and src_members is None:
+            continue
+        equal = d is not None and _same(a, b)
+        if equal and not include_same:
+            continue
+        row["diffs"].append({"attr": spec.name, "label": spec.label, "kind": spec.kind, "source": a, "target": b,
+                             "same": equal, "env_specific": spec.env_specific, "required": spec.required,
+                             "only_in_target": spec.name.startswith("config.") and
+                             spec.label not in (s.get("config") or {})})
+    if d is not None:
+        row["status"] = "different" if any(not x["same"] for x in row["diffs"]) else "same"
+    return row
+
+
+def group_names(connector, objs):
+    """Names of the governance groups the objects' approvers refer to, looked up one by one."""
+    names = {}
+    for obj in objs:
+        for token in (obj or {}).get("approval_schemes") or []:
+            if token.startswith("governance_group:"):
+                gid = token.split(":", 1)[1]
+                if gid not in names:
+                    found = connector.find_governance_groups(gid)
+                    names[gid] = found[0]["name"] if found else gid
+    return names
+
+
+def compare_one(src, dst, type_, ref):
+    """The attribute table for one object of the source environment and its namesake in the target."""
+    if type_ not in COPY_TYPES:
+        raise ValueError("Choose an object type: " + ", ".join(COPY_TYPES))
+    found = [o for o in src.find_objects(type_, ref)
+             if o["id"].lower() == ref.lower() or (o.get("name") or "").lower() == ref.lower()]
+    if len(found) != 1:
+        raise ValueError(f"{model.TYPE_LABELS[type_]} '{ref}' " +
+                         ("was not found" if not found else f"matches {len(found)} objects; choose it by ID"))
+    s = found[0]
+    matches = find_by_name(dst, type_, s["name"])
+    if len(matches) > 1:
+        raise ValueError(f"'{s['name']}' matches {len(matches)} objects in the target; names must be unique")
+    d = dst.get_object(type_, matches[0]["id"]) if matches else None
+    return object_row(src, dst, type_, s, d, group_names(src, [s]), group_names(dst, [d]), include_same=True)

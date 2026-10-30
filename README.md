@@ -222,39 +222,35 @@ job created. See `examples/governance_groups_sandbox.csv`.
 
 ## Copy between environments
 
-Promote work from a test tenant to production (or between any two connections) **attribute by
-attribute**: access profiles, roles, governance groups and sources. Like everything else, it is
+Move values from a test tenant to production (or between any two connections) **attribute by attribute**:
+access profiles, roles, governance groups and sources. No CSV involved. Like everything else, it is
 **experimental** and tested only against the offline sandbox.
 
-1. **Compare** (top bar): choose *Copy from* (e.g. test), *Copy to* (e.g. production) and an object type.
-   The toolkit reads both environments (read-only) and lists each object as *new*, *different* or
-   *same*, with every differing attribute side by side.
-2. Tick the objects and, for existing ones, the attributes to copy, then **Create copy job**. Or upload a
-   CSV for the *Copy objects between environments* action on **New job** (job option *Copy from*).
-3. The job is planned against the target like any other: every attribute shows its before → after, rows
-   with problems are flagged, and nothing changes until you approve and start it. Rollback restores the
-   previous values and deletes the objects the job created.
+1. Open **Copy** and choose *From* (e.g. test), *To* (e.g. production) and the object type in the
+   dropdowns, then pick the object from the searchable *Object* dropdown.
+2. Every attribute is listed with its value in both environments. Differences are ticked, matching values
+   are greyed out. Tick or untick the values to move. For sources, environment-specific settings can be
+   given a different value for the target in *Use instead*.
+3. **Move** plans the change read-only and shows exactly what will change (before → after) for you to
+   confirm — on production by typing the connection name. Nothing is sent before that, and if the target
+   changed after you reviewed it, the move is refused and you see the new summary.
+
+Each move is recorded as a job, so it appears on **Jobs** with its audit log, and **Create rollback** on
+that job restores the previous values (or deletes an object the move created). To review many objects
+at once, *Compare all objects of a type* lists every new and different object of a type side by side and
+turns the ticked ones into one job.
 
 **References are matched by name**, because IDs differ between tenants: owners and members by email
 (or username), governance groups, access profiles and sources by name, entitlements by name or value on
-the matching source. Anything that cannot be matched in the target fails the row in the plan. Rows run in
-file order, and a row can use an object created by an earlier row of the same job — put the governance
-group above the access profile it approves.
+the matching source. Anything that cannot be matched in the target is shown before you confirm, and
+nothing is moved. A referenced object that is missing in the target (say, a new approver group) must be
+copied first.
 
 **Environment-specific settings are kept.** Governance group members, a source's virtual appliance
 cluster and its connection settings (anything that names a host, URL, port, domain, service account,
-search DN, client ID…) are left as they are in the target, and are not copied to new objects, unless a row
-names them in `attributes` or sets a target value in `overrides`. **Secrets** (passwords, client
+search DN, client ID…) are left as they are in the target, and are not copied to new objects, unless
+you tick them (or give a target value in *Use instead*). **Secrets** (passwords, client
 secrets, tokens) are never copied: the API does not return them.
-
-| Column | Required | Notes |
-|---|---|---|
-| `object_type` | yes | `access_profile`, `role`, `governance_group` or `source`. |
-| `object` | yes | Name or ID in the environment you copy **from**. |
-| `target_name` | | Name in the target when it differs. |
-| `attributes` | | For objects that already exist in the target: attributes to copy, separated by `;`. Blank = all except environment-specific ones. Source connector settings are `config.<setting>`, e.g. `config.pageSize`. |
-| `keep` | | Attributes to leave as they are in the target — also for new objects. |
-| `overrides` | | Sources only: target values instead of the copied ones, `name=value` separated by `;` (list values separated by `\|`), e.g. `cluster=Prod VA;config.host=dc01.prod.local`. A new source on a virtual appliance needs `cluster=`. |
 
 Attributes: access profiles — `description`, `owner`, `requestable`, `enabled`, `approval_schemes`,
 `comments_required`, `denial_comments_required`, `entitlements`; roles — `description`, `owner`,

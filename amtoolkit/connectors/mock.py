@@ -299,6 +299,12 @@ class MockTenant(Connector):
                     if ident is None:
                         raise ConnectorError("HTTP 400: owner identity not found", status=400)
                     op["value"]["name"] = ident["name"]
+                # Like the real API, references read back with their names.
+                refs = {"/entitlements": "entitlements", "/accessProfiles": "access_profiles"}
+                if op["path"] in refs:
+                    known = {o["id"]: o.get("name") for o in state[refs[op["path"]]]}
+                    for ref in op["value"]:
+                        ref["name"] = known.get(ref["id"])
             model.apply_patch(obj, ops)
             self._save(state)
 

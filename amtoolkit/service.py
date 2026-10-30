@@ -5,15 +5,18 @@
 * Rows that already ran cannot be edited. Every edit is recorded in the audit log with before/after values.
 * Production connections require typing the connection name to approve.
 """
+import itertools
 import logging
 from pathlib import Path
 
 from . import csvio
-from .actions import ACTIONS, get_action
+from .actions import ACTIONS, Plan, get_action, msg
 from .connectors import ConnectionManager, KINDS
 from .db import Database
 from .engine import Engine, JobStateError, plan_context, plan_item, recheck_duplicates
-from .compare import CompareRunner
+from .actions.copy import COPY_TYPES
+from .compare import CompareRunner, compare_one
+from .connectors import AuthError, ConfigError, ConnectorError, model
 from .reports import REPORTS, ReportRunner
 from .store import EDITABLE_ITEM_STATUSES, NotFound, Store
 from .util import now_iso
@@ -384,6 +387,83 @@ class Toolkit:
                              f"Created from report '{definition.title}' ({len(rows)} finding(s))"
                              + (f"; filled for all rows: {', '.join(defaults)}" if defaults else ""),
                              data={"report_id": report_id, "defaults": defaults})
+        return job_id
+
+    # ---------------------------------------------------------------- copy one object between environments
+    def list_object_names(self, conn_id, type_, query="", limit=50):
+        """Names of objects of a type for the object picker: the first `limit`, or those containing `query`."""
+        if type_ not in COPY_TYPES:
+            raise ValueError("Unknown object type")
+        connector = self.connections.build(conn_id)
+        query = (query or "").strip()
+        if query:
+            names = [s["value"] for s in connector.suggest(f"object:{type_}", query, None, limit)]
+        else:
+            names = [o["name"] for o in itertools.islice(connector.list_objects(type_, limit=limit), limit)]
+        return sorted(dict.fromkeys(n for n in names if n), key=str.lower)
+
+    def copy_request(self, data):
+        """Validates a copy request from the Copy page: two different connections, a type and an object."""
+        data = data or {}
+        type_ = data.get("object_type")
+        if type_ not in COPY_TYPES:
+            raise ValueError("Choose an object type")
+        source = self.store.get_connection(str(data.get("source_connection_id") or ""))
+        target = self.store.get_connection(str(data.get("connection_id") or ""))
+        if source["id"] == target["id"]:
+            raise ValueError("Choose two different connections")
+        obj = str(data.get("object") or "").strip()
+        if not obj:
+            raise ValueError("Choose an object")
+        attributes = [str(a) for a in data.get("attributes") or [] if str(a).strip()]
+        overrides = {}
+        for key, value in (data.get("overrides") or {}).items():
+            value = str(value or "").strip()
+            if value and (";" in value or "\n" in value):
+                raise ValueError(f"The value for {key} cannot contain ';' or line breaks")
+            if value:
+                overrides[str(key)] = value
+        return {"source_connection_id": source["id"], "connection_id": target["id"], "object_type": type_,
+                "object": obj, "attributes": attributes, "overrides": overrides}
+
+    def copy_preview(self, data):
+        """Every copyable attribute of one object, its value in both environments and whether they match."""
+        req = self.copy_request(data)
+        return compare_one(self.connections.build(req["source_connection_id"]),
+                           self.connections.build(req["connection_id"]), req["object_type"], req["object"])
+
+    def _copy_row(self, req):
+        action = get_action("object.copy")
+        return action.normalize({"object_type": req["object_type"], "object": req["object"],
+                                 "attributes": ";".join(req["attributes"]),
+                                 "overrides": ";".join(f"{k}={v}" for k, v in req["overrides"].items())})
+
+    def plan_copy(self, req):
+        """Plans copying one object without creating a job: what would change, read-only."""
+        action = get_action("object.copy")
+        ctx = plan_context(self.connections, {"options": {"source_connection_id": req["source_connection_id"]},
+                                              "connection_id": req["connection_id"]}, action)
+        try:
+            return action.plan(ctx, self._copy_row(req), {"if_missing": "create"})
+        except (AuthError, ConfigError):
+            raise
+        except ConnectorError as exc:
+            return Plan("error", req["object"], None, [msg("error", f"Lookup failed: {exc}", None, "lookup_failed")])
+
+    def start_copy_job(self, req):
+        """The job that records a move from the Copy page. Planned (waited for) but not approved or started."""
+        source = self.store.get_connection(req["source_connection_id"])
+        target = self.store.get_connection(req["connection_id"])
+        label = model.TYPE_LABELS[req["object_type"]].lower()
+        job_id = self.create_job(name=f"Copy {label} {req['object']} from {source['name']} to {target['name']}",
+                                 action_key="object.copy", connection_id=target["id"],
+                                 options={"source_connection_id": source["id"], "if_missing": "create"},
+                                 filename="Copy page", data=None, rows=[(1, self._copy_row(req))])
+        self.engine.wait(job_id)
+        [item] = self.store.all_items(job_id)
+        if item["target"]:  # the request names the object by its ID; the plan knows its name
+            self.store.update_job(job_id, name=f"Copy {label} {item['target']} from {source['name']} to "
+                                               f"{target['name']}"[:200])
         return job_id
 
     def create_copy_job(self, compare_id, selections, name=None):

@@ -279,6 +279,13 @@ class Engine:
             raise JobStateError("The plan can only be refreshed before or between runs")
         return self._launch(job_id, "plan", only_unplanned=only_unplanned)
 
+    def wait(self, job_id, timeout=120):
+        """Blocks until the job's current planning or run finishes (or the timeout passes)."""
+        with self._lock:
+            runner = self._runners.get(job_id)
+        if runner is not None:
+            runner.join(timeout)
+
     def start(self, job_id):
         if not self.store.is_approved(job_id):
             raise JobStateError("Approve the current plan before running it")

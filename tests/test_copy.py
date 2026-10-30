@@ -287,3 +287,80 @@ def test_group_members_are_copied_only_when_named(toolkit, envs):
     assert prod_id(BOB) in {m["id"] for m in p.list_governance_group_members(prod_group)}
     run(toolkit, rollback(toolkit, job2))
     assert prod_id(BOB) not in {m["id"] for m in p.list_governance_group_members(prod_group)}
+
+
+# ---------------------------------------------------------------------------- Copy page: one object, no CSV
+def test_object_picker_lists_names(toolkit, envs):
+    test, _ = envs
+    make_profile(conn(toolkit, test), "Payroll", BOB, ["HR-Read"])
+    assert toolkit.list_object_names(test["id"], "access_profile") == ["Legacy VPN", "Payroll"]
+    assert toolkit.list_object_names(test["id"], "access_profile", "pay") == ["Payroll"]
+    assert "Active Directory" in toolkit.list_object_names(test["id"], "source")
+
+
+def test_preview_lists_every_attribute_side_by_side(toolkit, envs):
+    test, prod = envs
+    make_profile(conn(toolkit, test), "Payroll", BOB, ["HR-Read"], "Test text")
+    make_profile(conn(toolkit, prod), "Payroll", prod_id(ALICE), ["HR-Read"], "Prod text")
+    row = toolkit.copy_preview({"source_connection_id": test["id"], "connection_id": prod["id"],
+                                "object_type": "access_profile", "object": "Payroll"})
+    attrs = {d["attr"]: d for d in row["diffs"]}
+    assert row["status"] == "different"
+    assert (attrs["description"]["source"], attrs["description"]["target"], attrs["description"]["same"]) == \
+        ("Test text", "Prod text", False)
+    assert attrs["entitlements"]["same"] is True and attrs["owner"]["required"] is True
+
+
+def move(client, toolkit, req, typed="Prod"):
+    planned = client.post("/api/copy/plan", json=req).get_json()
+    confirmation = {"token": planned["confirmation"]["token"], "acknowledged": True, "text": typed}
+    return planned, client.post("/api/copy/move", json=dict(req, confirmation=confirmation))
+
+
+def test_move_selected_values_from_the_copy_page(client, toolkit, envs):
+    test, prod = envs
+    make_profile(conn(toolkit, test), "Payroll", BOB, ["HR-Read"], "Test text", requestable=False)
+    p = conn(toolkit, prod)
+    make_profile(p, "Payroll", prod_id(ALICE), ["HR-Read"], "Prod text")
+    req = {"source_connection_id": test["id"], "connection_id": prod["id"], "object_type": "access_profile",
+           "object": "Payroll", "attributes": ["description"]}
+    planned, resp = move(client, toolkit, req)
+    assert planned["op"] == "update"
+    assert "Description: 'Prod text' → 'Test text'" in planned["confirmation"]["lines"]
+    assert planned["confirmation"]["requires_text"] == "Prod"
+    assert resp.status_code == 201, resp.get_json()
+    job_id = resp.get_json()["id"]
+    wait_for(lambda: toolkit.store.get_job(job_id)["status"] == "completed")
+    after = p.find_objects("access_profile", "Payroll")[0]
+    assert (after["description"], after["owner"], after["requestable"]) == ("Test text", prod_id(ALICE), True)
+    assert toolkit.job_view(job_id)["allowed"]["rollback"]
+
+
+def test_move_is_refused_when_the_target_changed_after_review(client, toolkit, envs):
+    test, prod = envs
+    make_profile(conn(toolkit, test), "Payroll", BOB, ["HR-Read"], "Test text")
+    p = conn(toolkit, prod)
+    make_profile(p, "Payroll", prod_id(ALICE), ["HR-Read"], "Prod text")
+    req = {"source_connection_id": test["id"], "connection_id": prod["id"], "object_type": "access_profile",
+           "object": "Payroll", "attributes": ["description"]}
+    planned = client.post("/api/copy/plan", json=req).get_json()
+    p.patch_object("access_profile", p.find_objects("access_profile", "Payroll")[0]["id"],
+                   {"description": "Edited in prod meanwhile"})
+    confirmation = {"token": planned["confirmation"]["token"], "acknowledged": True, "text": "Prod"}
+    resp = client.post("/api/copy/move", json=dict(req, confirmation=confirmation))
+    assert resp.status_code == 428
+    assert toolkit.store.list_jobs() == []  # the discarded attempt leaves nothing behind
+    assert p.find_objects("access_profile", "Payroll")[0]["description"] == "Edited in prod meanwhile"
+
+
+def test_new_object_gets_only_the_chosen_attributes_plus_required_ones(client, toolkit, envs):
+    test, prod = envs
+    make_profile(conn(toolkit, test), "Payroll", BOB, ["HR-Read"], "Test text", requestable=False)
+    req = {"source_connection_id": test["id"], "connection_id": prod["id"], "object_type": "access_profile",
+           "object": "Payroll", "attributes": ["description"]}
+    planned, resp = move(client, toolkit, req)
+    assert planned["op"] == "create", planned["messages"]
+    wait_for(lambda: toolkit.store.get_job(resp.get_json()["id"])["status"] == "completed")
+    created = conn(toolkit, prod).find_objects("access_profile", "Payroll")[0]
+    assert (created["description"], created["owner"], created["requestable"]) == ("Test text", prod_id(BOB), True)
+    assert toolkit.store.get_job(resp.get_json()["id"])["name"] == "Copy access profile Payroll from Test to Prod"
