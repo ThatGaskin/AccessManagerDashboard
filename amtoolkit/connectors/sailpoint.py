@@ -6,7 +6,7 @@ actions need, e.g. `idn:access-profile:manage`, `idn:sources:read`, `idn:entitle
 The experimental features additionally use roles, entitlement updates, sources, access requests and
 approvals (e.g. `idn:role-unchecked:manage`, `idn:entitlement:update`, `idn:sources:manage`,
 `idn:access-request:manage`, `idn:access-request-administration:write`). Copying sources between
-environments also uses `idn:managed-cluster:read`.
+environments also uses `idn:managed-cluster:read`, and change history `sp:search:read`.
 """
 import re
 
@@ -349,6 +349,24 @@ class SailPointISC(Connector):
 
     def delete_source(self, source_id):
         self.api.request("DELETE", f"/v3/sources/{source_id}")
+
+    def object_events(self, type_, object_id, name, limit=100):
+        """Audit events from the search API (scope sp:search:read). ISC records who changed an object and
+        when; most events do not carry the old and new values, so `changes` is usually empty."""
+        body = {"indices": ["events"], "query": {"query": f'target.name:{q(name)}'}, "sort": ["-created"]}
+        rows = self.api.request("POST", "/v3/search", params={"limit": limit}, json=body) or []
+        out = []
+        for e in rows:
+            attrs = e.get("attributes") or {}
+            changes = {}
+            for key, value in attrs.items():  # some events name the attribute with old/new values
+                if isinstance(value, dict) and ("oldValue" in value or "newValue" in value):
+                    changes[key] = {"old": value.get("oldValue"), "new": value.get("newValue")}
+            out.append({"time": e.get("created"), "actor": (e.get("actor") or {}).get("name"),
+                        "action": e.get("name") or e.get("action") or e.get("technicalName"),
+                        "status": e.get("status"), "changes": changes,
+                        "details": {k: v for k, v in attrs.items() if k not in changes}})
+        return out
 
     def find_clusters(self, ref):
         ref = ref.strip()

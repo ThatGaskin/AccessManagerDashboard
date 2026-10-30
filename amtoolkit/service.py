@@ -19,7 +19,7 @@ from .compare import CompareRunner, compare_one
 from .connectors import AuthError, ConfigError, ConnectorError, model
 from .reports import REPORTS, ReportRunner
 from .store import EDITABLE_ITEM_STATUSES, NotFound, Store
-from .util import now_iso
+from .util import loads, now_iso
 
 log = logging.getLogger(__name__)
 
@@ -313,7 +313,7 @@ class Toolkit:
         summary = ", ".join(f"{n} {op}" for op, n in sorted(preview["ops"].items()))
         self.store.add_event(job_id, "info", "approved",
                              f"Plan approved{' by ' + approver if approver else ''}: {summary}",
-                             data={"fingerprint": fingerprint, "ops": preview["ops"]})
+                             data={"fingerprint": fingerprint, "ops": preview["ops"], "approver": approver})
 
     def retry_failed(self, job_id):
         job = self.store.get_job(job_id)
@@ -366,6 +366,100 @@ class Toolkit:
                              f"Created a job to add {len(names)} missing governance group(s): {', '.join(names)}. "
                              "Re-plan this job after it has run.", data={"job_id": new_id, "groups": names})
         return new_id
+
+    # ---------------------------------------------------------------- change history
+    def object_history(self, conn_id, type_, object_id, attribute=None):
+        """Changes to one object (optionally one attribute) in one environment, fetched on request: the
+        toolkit's own record of what its jobs changed (exact before -> after, who approved it) and the
+        tenant's audit events (who changed the object and when; values only where the event carries them)."""
+        if type_ not in COPY_TYPES:
+            raise ValueError("Unknown object type")
+        conn = self.store.get_connection(conn_id)
+        connector = self.connections.build(conn_id)
+        obj = connector.get_object(type_, object_id)
+        if obj is None:
+            raise NotFound(f"{model.TYPE_LABELS[type_]} {object_id} not found in {conn['name']}")
+        tenant, tenant_error = [], None
+        try:
+            for event in connector.object_events(type_, obj["id"], obj["name"]):
+                changes = event.get("changes") or {}
+                if attribute and changes and attribute not in changes:
+                    continue
+                if attribute and changes:
+                    changes = {attribute: changes[attribute]}
+                tenant.append(dict(event, changes=changes, values_known=bool(changes)))
+        except NotImplementedError:
+            tenant_error = "This connection type does not provide audit events"
+        except (AuthError, ConfigError) as exc:
+            tenant_error = f"Could not read audit events: {exc}"
+        except ConnectorError as exc:
+            tenant_error = f"Could not read audit events: {exc}"
+        return {"connection": {k: conn[k] for k in ("id", "name", "environment")},
+                "object": {"type": type_, "id": obj["id"], "name": obj["name"], "modified": obj.get("modified")},
+                "attribute": attribute, "toolkit": self._toolkit_history(conn_id, obj["id"], attribute),
+                "tenant": tenant, "tenant_error": tenant_error}
+
+    def _toolkit_history(self, conn_id, object_id, attribute):
+        rows = self.db.query(
+            "SELECT i.op, i.payload, i.remote_id, i.updated_at, j.id AS job_id, j.name AS job_name, j.action "
+            "FROM items i JOIN jobs j ON j.id = i.job_id WHERE j.connection_id = ? AND i.status = 'succeeded' "
+            "AND (i.payload LIKE ? OR i.remote_id = ?) ORDER BY i.updated_at DESC",
+            (conn_id, f'%"id":"{object_id}"%', object_id))
+        approvers = {}
+        out = []
+        for row in rows:
+            payload = loads(row["payload"], {}) or {}
+            target = payload.get("object") or {}
+            if row["job_id"] not in approvers:
+                event = self.db.query_one("SELECT data FROM events WHERE job_id = ? AND kind = 'approved' "
+                                          "ORDER BY id DESC LIMIT 1", (row["job_id"],))
+                approvers[row["job_id"]] = (loads(event["data"], {}) or {}).get("approver") if event else None
+            base = {"time": row["updated_at"], "job_id": row["job_id"], "job_name": row["job_name"],
+                    "action": ACTIONS[row["action"]].title if row["action"] in ACTIONS else row["action"],
+                    "approved_by": approvers[row["job_id"]]}
+            if row["op"] == "create" and row["remote_id"] == object_id:
+                out.append(dict(base, change="created", changes={}))
+            elif target.get("id") == object_id and isinstance(payload.get("after"), dict):
+                labels = payload.get("labels") or {}
+                changes = {f: {"old": labels[f][0] if f in labels else payload["before"].get(f),
+                               "new": labels[f][1] if f in labels else v}
+                           for f, v in payload["after"].items() if not attribute or f == attribute}
+                if changes:
+                    out.append(dict(base, change="updated", changes=changes))
+            elif row["op"] == "delete" and target.get("id") == object_id:
+                out.append(dict(base, change="deleted", changes={}))
+        return out
+
+    def compare_csv(self, compare_id):
+        """A finished comparison as CSV: one line per differing attribute, entitlement or missing object."""
+        r = self.compare.get(compare_id)
+        if r["status"] != "completed":
+            raise JobStateError("The comparison has not finished")
+        src, dst = r["source"]["name"], r["target"]["name"]
+
+        def text(v):
+            if isinstance(v, bool):
+                return "yes" if v else "no"
+            if isinstance(v, list):
+                return "; ".join(map(str, v))
+            return "" if v is None else str(v)
+        lines = []
+        for row in r["rows"]:
+            changed = [text(row.get("source_modified")), text(row.get("target_modified")), text(row.get("newer"))]
+            if row["status"] in ("new", "ambiguous"):
+                lines.append([row["name"], row["status"], "", "", "", "", row.get("problem", "")] + changed)
+            for d in row["diffs"] if row["status"] == "different" else []:
+                lines.append([row["name"], "different", d["label"], text(d["source"]), text(d["target"]),
+                              "yes" if d["env_specific"] else "", ""] + changed)
+            ents = row.get("entitlements") or {}
+            for name in ents.get("only_in_source", []):
+                lines.append([row["name"], "entitlement", "entitlement", name, "", "", f"only in {src}"] + changed)
+            for name in ents.get("only_in_target", []):
+                lines.append([row["name"], "entitlement", "entitlement", "", name, "", f"only in {dst}"] + changed)
+        lines += [[name, f"only in {dst}", "", "", "", "", ""] + [""] * 3 for name in r["only_in_target"]]
+        headers = ["object", "status", "attribute", f"value in {src}", f"value in {dst}", "environment-specific",
+                   "note", f"last changed in {src}", f"last changed in {dst}", "changed more recently in"]
+        return csvio.write(headers, lines)
 
     def report_csv(self, report_id):
         rep = self.reports.get(report_id)

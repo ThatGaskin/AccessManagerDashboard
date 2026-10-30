@@ -156,7 +156,10 @@ table.diff { table-layout: fixed; }
 table.diff th:nth-child(1) { width: 28px; } table.diff th:nth-child(2) { width: 26%; } table.diff th:nth-child(4) { width: 40px; }
 table.diff.copy th:nth-child(6) { width: 190px; }
 table.compare-list { table-layout: fixed; }
-table.compare-list > thead th:nth-child(1) { width: 32px; } table.compare-list > thead th:nth-child(2) { width: 190px; }
+table.compare-list > thead th:nth-child(1) { width: 32px; } table.compare-list > thead th:nth-child(2) { width: 230px; }
+.compare-list .changed { flex-direction: column; align-items: flex-start; gap: 2px; }
+.compare-list .changed .badge { white-space: normal; }
+.compare-list .changed .sep { display: none; }
 table.diff tr.row-same td { color: var(--muted); }
 table.diff tr.row-diff td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
 table.diff tr.row-move td:first-child { box-shadow: inset 3px 0 0 var(--hl-orange); }
@@ -168,6 +171,16 @@ table.diff tr.row-diff td.val:not(.after) { background: var(--warn-bg); }
 .vchip.remove { background: var(--err-bg); color: var(--err); border-color: transparent; text-decoration: line-through; }
 del.v { color: var(--err); background: var(--err-bg); padding: 0 3px; border-radius: 3px; }
 ins.v { color: var(--ok); background: var(--ok-bg); text-decoration: none; padding: 0 3px; border-radius: 3px; font-weight: 600; }
+.changed { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
+button.link.hist { font-size: 11px; margin-left: 6px; opacity: .8; }
+.history { list-style: none; margin: 8px 0 0; padding: 0; }
+.history li { border-left: 3px solid var(--border); padding: 4px 0 8px 10px; margin-bottom: 6px; }
+.history li:first-child { border-left-color: var(--hl-orange); }
+.hist-change { font-size: 12px; margin-top: 2px; word-break: break-word; }
+.history-col h3 { margin-top: 0; }
+.ents { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--border); }
+.ent-chips { margin-top: 4px; }
+.scan-summary { margin-bottom: 12px; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; margin: 4px 0 8px; }
 .legend > span { display: inline-flex; align-items: center; gap: 4px; }
 table.copy input.override { font-size: 12px; padding: 3px 6px; }

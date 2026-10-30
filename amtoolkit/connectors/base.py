@@ -144,6 +144,11 @@ class Connector:
     def delete_source(self, source_id: str) -> None:
         raise NotImplementedError
 
+    def object_events(self, type_: str, object_id: str, name: str, limit: int = 100) -> list:
+        """Audit events about one object, newest first: [{time, actor, action, changes: {attribute: {old, new}},
+        details}]. `changes` is empty when the event does not say which values changed."""
+        raise NotImplementedError
+
     def find_clusters(self, ref: str) -> list:
         """Virtual appliance clusters by ID or exact name: [{id, name}]."""
         raise NotImplementedError

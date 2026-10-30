@@ -18,6 +18,7 @@ from .util import new_id, now_iso
 
 log = logging.getLogger(__name__)
 KEEP = 10  # comparisons kept in memory
+NAMES_SHOWN = 200  # entitlement names listed per source and side; the counts are always complete
 
 
 def comparable(spec, obj, group_names, members=None):
@@ -121,7 +122,10 @@ class CompareRunner:
             for key, objs in sorted(src_objs.items()):
                 rows.append(self._row(src, dst, type_, objs, dst_objs.get(key, []), src_groups, dst_groups, abort))
             result["only_in_target"] = sorted(objs[0]["name"] for key, objs in dst_objs.items() if key not in src_objs)
+            if type_ == "source":
+                self._entitlements(src, dst, rows, result, abort)
             result["rows"] = rows
+            result["summary"] = self._summary(rows, result, len(src_objs), len(dst_objs))
             result["status"] = "completed"
         except Interrupted:
             result["status"] = "cancelled"
@@ -134,6 +138,45 @@ class CompareRunner:
             result["finished_at"] = now_iso()
             with self._lock:
                 self._aborts.pop(result["id"], None)
+
+    def _catalog(self, connector, result, abort):
+        """Entitlement names per source (lower-cased source name -> {lower-cased name: name})."""
+        out = {}
+        count = 0
+        for ent in connector.list_objects("entitlement", limit=MAX_PER_TYPE, abort_event=abort):
+            if abort.is_set():
+                raise Interrupted()
+            name = ent.get("name") or ent.get("value") or ent["id"]
+            out.setdefault((ent.get("source_name") or "").lower(), {})[name.lower()] = name
+            count += 1
+            result["scanned"] += 1
+        return out, count >= MAX_PER_TYPE
+
+    def _entitlements(self, src, dst, rows, result, abort):
+        """Adds each source's entitlement catalog comparison. Entitlements are not copied — they come from
+        aggregating the source — but a missing one breaks access profiles that use it."""
+        src_cat, src_cut = self._catalog(src, result, abort)
+        dst_cat, dst_cut = self._catalog(dst, result, abort)
+        result["entitlements_incomplete"] = src_cut or dst_cut
+        for row in rows:
+            a = src_cat.get(row["name"].lower(), {})
+            b = dst_cat.get(row["name"].lower(), {}) if row["target_id"] else None
+            ents = {"source_count": len(a), "target_count": None if b is None else len(b),
+                    "only_in_source": [], "only_in_target": []}
+            if b is not None:
+                only_a = sorted((a[k] for k in a.keys() - b.keys()), key=str.lower)
+                only_b = sorted((b[k] for k in b.keys() - a.keys()), key=str.lower)
+                ents.update(only_in_source=only_a[:NAMES_SHOWN], only_in_target=only_b[:NAMES_SHOWN],
+                            only_in_source_count=len(only_a), only_in_target_count=len(only_b))
+            row["entitlements"] = ents
+            row["entitlements_differ"] = bool(b is not None and (ents["only_in_source"] or ents["only_in_target"]))
+
+    @staticmethod
+    def _summary(rows, result, in_source, in_target):
+        count = lambda status: sum(1 for r in rows if r["status"] == status)  # noqa: E731
+        return {"in_source": in_source, "in_target": in_target, "new": count("new"), "different": count("different"),
+                "same": count("same"), "ambiguous": count("ambiguous"), "only_in_target": len(result["only_in_target"]),
+                "entitlements_differ": sum(1 for r in rows if r.get("entitlements_differ"))}
 
     def _row(self, src, dst, type_, src_objs, dst_objs, src_groups, dst_groups, abort):
         if len(src_objs) > 1 or len(dst_objs) > 1:
@@ -176,6 +219,12 @@ def object_row(src, dst, type_, s, d, src_groups, dst_groups, include_same=False
                              spec.label not in (s.get("config") or {})})
     if d is not None:
         row["status"] = "different" if any(not x["same"] for x in row["diffs"]) else "same"
+    # When each side was last changed, and which one more recently: a target changed after the source may
+    # hold a fix that moving the source's values would overwrite.
+    row["source_modified"] = s.get("modified")
+    row["target_modified"] = d.get("modified") if d is not None else None
+    row["newer"] = {"first": "source", "second": "target", "same": "same"}.get(
+        model.changed_later(row["source_modified"], row["target_modified"]))
     return row
 
 

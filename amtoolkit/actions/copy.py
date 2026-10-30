@@ -110,10 +110,7 @@ def default_selection(specs):
     return [a.name for a in specs.values() if not a.env_specific and not a.secret]
 
 
-def value_of(obj, field):
-    if field.startswith(CONFIG):
-        return (obj.get("config") or {}).get(field[len(CONFIG):])
-    return obj.get(field)
+value_of = model.value_of
 
 
 def _fmt(value):
@@ -755,6 +752,10 @@ class CopyObjects(Action):
         for x in members:
             names.setdefault(x["id"], x.get("name") or x["id"])
         changes = {f: v for f, v in values.items() if not same(f, value_of(current, f), v)}
+        if changes and model.changed_later(current.get("modified"), src.get("modified")) == "first":
+            m.append(msg("warning", f"Changed here more recently ({current['modified']}) than in the environment you "
+                                    f"copy from ({src['modified']}). Moving overwrites that newer change — check the "
+                                    "history first.", "attributes", "target_newer"))
         if not changes:
             m.append(msg("info", "Already the same here; this row will be skipped", None, "unchanged"))
             self._kept_note(type_, src, current, specs, chosen, m)

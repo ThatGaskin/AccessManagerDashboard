@@ -402,3 +402,58 @@ def test_demo_environments_show_each_kind_of_difference(client, toolkit):
     toolkit.create_demo_environments()
     assert p.find_objects("access_profile", "Finance - Read")[0]["description"] == "Finance read"
     assert len(toolkit.store.list_connections()) == 2
+
+
+# ---------------------------------------------------------------------------- scans, change times, history
+def demo_compare(toolkit, type_):
+    test, prod = toolkit.create_demo_environments()
+    compare_id = toolkit.compare.start(test["id"], prod["id"], type_)
+    result = wait_for(lambda: (r := toolkit.compare.get(compare_id))["status"] == "completed" and r, timeout=30)
+    return test, prod, compare_id, {r["name"]: r for r in result["rows"]}, result
+
+
+def test_source_scan_compares_entitlement_catalogs(toolkit):
+    _, _, compare_id, rows, result = demo_compare(toolkit, "source")
+    assert rows["Active Directory"]["entitlements"]["only_in_source"] == ["Cloud-Admins"]
+    assert rows["Workday"]["entitlements"]["only_in_target"] == ["Contractor"]
+    assert rows["Salesforce"]["entitlements_differ"] and rows["ServiceNow"]["status"] == "new"
+    assert rows["ServiceNow"]["entitlements"]["target_count"] is None
+    assert result["summary"]["entitlements_differ"] == 3 and result["summary"]["new"] == 1
+    csv = toolkit.compare_csv(compare_id)
+    assert "Cloud-Admins" in csv and "only in Demo Prod" in csv and "pageSize" in csv
+
+
+def test_comparison_marks_which_side_changed_more_recently(toolkit):
+    test, prod, _, rows, _ = demo_compare(toolkit, "access_profile")
+    assert rows["Finance - Read"]["newer"] == "source"
+    assert rows["Finance - Write"]["newer"] == "target"  # changed in production after test
+    req = toolkit.copy_request({"source_connection_id": test["id"], "connection_id": prod["id"],
+                                "object_type": "access_profile", "object": "Finance - Write"})
+    plan = toolkit.plan_copy(req)
+    assert plan.op == "update" and any(m["code"] == "target_newer" for m in plan.messages)
+
+
+def test_attribute_history_from_audit_events_and_toolkit_jobs(client, toolkit):
+    test, prod = toolkit.create_demo_environments()
+    p = toolkit.connections.build(prod["id"])
+    payroll = p.find_objects("access_profile", "Payroll Admin")[0]["id"]
+    history = toolkit.object_history(prod["id"], "access_profile", payroll, "enabled")
+    # Events that do not record values (here: the creation) are kept, since they may still be the change.
+    [event] = [e for e in history["tenant"] if e["values_known"]]
+    assert any(not e["values_known"] for e in history["tenant"])
+    assert (event["actor"], event["changes"]["enabled"]) == ("Frank Finance", {"old": True, "new": False})
+
+    req = {"source_connection_id": test["id"], "connection_id": prod["id"], "object_type": "access_profile",
+           "object": "Payroll Admin", "attributes": ["enabled"]}
+    planned = client.post("/api/copy/plan", json=req).get_json()
+    resp = client.post("/api/copy/move", json=dict(req, confirmation={
+        "token": planned["confirmation"]["token"], "acknowledged": True, "text": "Demo Prod"}))
+    wait_for(lambda: toolkit.store.get_job(resp.get_json()["id"])["status"] == "completed", timeout=20)
+    history = client.get(f"/api/connections/{prod['id']}/history?type=access_profile&id={payroll}"
+                         "&attribute=enabled").get_json()
+    [mine] = history["toolkit"]
+    assert mine["changes"]["enabled"] == {"old": "no", "new": "yes"} and mine["approved_by"]
+    assert history["tenant"][0]["changes"]["enabled"] == {"old": False, "new": True}  # the sandbox's own audit trail
+    assert len([e for e in history["tenant"] if e["values_known"]]) == 2
+    everything = toolkit.object_history(prod["id"], "access_profile", payroll)
+    assert any(e["action"] == "Create access profile" for e in everything["tenant"])
