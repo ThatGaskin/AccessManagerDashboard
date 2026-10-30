@@ -76,6 +76,7 @@ class ClientCredentialsToken:
                 raise ConnectorError(f"Token request failed (HTTP {resp.status_code})", status=resp.status_code,
                                      retryable=resp.status_code >= 500)
             body = resp.json()
+            log.info("Obtained an access token for client %s", self.client_id)
             self._token = body["access_token"]
             self._expires = time.monotonic() + max(30, int(body.get("expires_in", 600)) - 60)
             return self._token
@@ -153,6 +154,7 @@ class ApiClient:
                 self._sleep(self.limiter.wait_time())
             all_headers = {**(headers or {}), "Authorization": f"Bearer {self.token.get()}",
                            "Accept": "application/json"}
+            started = time.monotonic()
             try:
                 resp = self.session.request(method, url, params=params, json=json, headers=all_headers,
                                             timeout=self.timeout)
@@ -169,14 +171,17 @@ class ApiClient:
                                        ambiguous=not idempotent)
                 safe_to_retry = idempotent
             else:
+                log.debug("%s %s -> %s (%.0f ms%s)", method, path, resp.status_code,
+                          (time.monotonic() - started) * 1000, f", attempt {attempt + 1}" if attempt else "")
                 if resp.status_code in ok:
                     if resp.status_code == 204 or not resp.content:
                         return None
                     return resp.json()
                 status = resp.status_code
                 text = self._error_text(resp)
-                log.debug("%s %s -> %s %s", method, path, status, text)
+                log.info("%s %s -> HTTP %s: %s", method, path, status, text)
                 if status == 401 and not refreshed:
+                    log.info("Access token rejected; requesting a new one")
                     self.token.invalidate()
                     refreshed = True
                     continue
@@ -188,7 +193,9 @@ class ApiClient:
                     error = ConnectorError(f"HTTP {status}: {text}", status=status, retryable=True)
                     safe_to_retry = True
                     if attempt < self.max_retries:
-                        self._sleep(self._backoff(attempt, self._retry_after(resp)))
+                        wait = self._backoff(attempt, self._retry_after(resp))
+                        log.warning("%s %s throttled (HTTP %s); retrying in %.1f s", method, path, status, wait)
+                        self._sleep(wait)
                         attempt += 1
                         continue
                     raise error
@@ -199,7 +206,11 @@ class ApiClient:
                 else:
                     raise ConnectorError(f"HTTP {status}: {text}", status=status)
             if safe_to_retry and attempt < self.max_retries:
-                self._sleep(self._backoff(attempt))
+                wait = self._backoff(attempt)
+                log.warning("%s %s failed (%s); retrying in %.1f s", method, path, error, wait)
+                self._sleep(wait)
                 attempt += 1
                 continue
+            log.warning("%s %s failed (%s)%s", method, path, error,
+                        "; the change may have been applied" if error.ambiguous else "")
             raise error

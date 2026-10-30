@@ -70,11 +70,18 @@ class Toolkit:
             conn = self.store.create_connection(name, kind, environment, config)
         if data.get("secret"):
             self.connections.set_secret(conn["id"], data["secret"])
+        log.info("Connection '%s' (%s, %s) %s", name, kind, environment, "updated" if conn_id else "created")
         return self.connection_view(conn)
 
     def test_connection(self, conn_id):
         connector = self.connections.build(conn_id)
-        return connector.test()
+        try:
+            result = connector.test()
+        except Exception as exc:
+            log.warning("Connection test for %s failed: %s", conn_id, exc)
+            raise
+        log.info("Connection test for %s succeeded: %s", conn_id, result)
+        return result
 
     # ---------------------------------------------------------------- jobs
     def create_job(self, *, name, action_key, connection_id, options, filename, data, parent_job_id=None,

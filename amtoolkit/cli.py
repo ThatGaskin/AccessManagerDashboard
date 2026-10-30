@@ -9,6 +9,8 @@ import threading
 import webbrowser
 from pathlib import Path
 
+from . import __version__, logs
+
 APP_NAME = "AccessManagerToolkit"
 
 
@@ -40,13 +42,13 @@ def main(argv=None) -> int:
     parser.add_argument("--data-dir", default=os.environ.get("AMT_DATA_DIR", str(default_data_dir())),
                         help=f"Folder for the SQLite database and sandbox state (default: {default_data_dir()})")
     parser.add_argument("--no-browser", action="store_true", help="Do not open a browser window")
-    parser.add_argument("--debug", action="store_true", help="Verbose logging")
+    parser.add_argument("--log-level", choices=logs.LEVELS, default=os.environ.get("AMT_LOG_LEVEL", "INFO").upper(),
+                        help="DEBUG also shows every call to the target system and the UI's polling (default: INFO)")
+    parser.add_argument("--debug", action="store_true", help="Same as --log-level DEBUG")
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    # Never log request bodies or headers from the HTTP library; they can contain tokens.
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    log_file = logs.setup(args.data_dir, "DEBUG" if args.debug else args.log_level)
+    logging.getLogger(__name__).info("Access Manager Toolkit %s starting (log file: %s)", __version__, log_file)
 
     url = f"http://127.0.0.1:{args.port}/"
     if port_in_use(args.port):
@@ -61,7 +63,7 @@ def main(argv=None) -> int:
 
     app = create_app(args.data_dir)
     toolkit = app.extensions["toolkit"]
-    print(f"Access Manager Toolkit running at {url}  (data: {Path(args.data_dir).resolve()})")
+    print(f"Access Manager Toolkit running at {url}  (data: {Path(args.data_dir).resolve()}, log: {log_file})")
     print("Keep this window open while you work. Press Ctrl+C to stop; running jobs are paused safely "
           "and can be resumed after restart.")
     if not args.no_browser:

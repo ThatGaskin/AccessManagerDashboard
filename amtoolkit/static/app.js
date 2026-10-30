@@ -134,6 +134,7 @@ const routes = [
   [/^#\/reports$/, renderReports],
   [/^#\/reports\/([\w-]+)$/, renderReport],
   [/^#\/jobs\/([\w-]+)$/, renderJob],
+  [/^#\/logs$/, renderLogs],
 ];
 
 async function route() {
@@ -151,6 +152,36 @@ async function route() {
     if (m) { await guarded(() => fn(...m.slice(1))); return; }
   }
   view.replaceChildren(h("div", { class: "empty" }, "Page not found"));
+}
+
+// ------------------------------------------------------------------ backend logs
+// Live tail of the server log: requests, calls to the target system and every job's audit events.
+async function renderLogs() {
+  let after = 0;
+  const levelSelect = h("select", {}, ["DEBUG", "INFO", "WARNING", "ERROR"].map((l) => h("option", { value: l }, l)));
+  levelSelect.value = "INFO";
+  const follow = h("input", { type: "checkbox", checked: true });
+  const tbody = h("tbody", {});
+  const box = h("div", { class: "panel log" }, h("table", {}, tbody));
+  async function load() {
+    const rows = await api("GET", `/api/logs?after=${after}&level=${levelSelect.value}`);
+    for (const r of rows) {
+      after = Math.max(after, r.id);
+      tbody.append(h("tr", { class: `lvl-${r.level.toLowerCase()}` }, h("td", { class: "nowrap muted" }, r.ts),
+        h("td", {}, r.level), h("td", { class: "muted" }, r.logger), h("td", { class: "pre" }, r.message)));
+    }
+    while (tbody.children.length > 2000) tbody.firstChild.remove();
+    if (rows.length && follow.checked) box.scrollTop = box.scrollHeight;
+    return true;
+  }
+  levelSelect.addEventListener("change", () => { after = 0; tbody.replaceChildren(); guarded(load); });
+  view.replaceChildren(h("div", { class: "row spread" }, h("h1", {}, "Backend log"),
+    h("div", { class: "row" }, h("label", {}, "Level ", levelSelect), h("label", {}, follow, " Follow"),
+      h("button", { onclick: () => { tbody.replaceChildren(); } }, "Clear view"))),
+    h("p", { class: "small muted" }, "Requests to this server, calls to the target system and job events. The same log is written to logs/toolkit.log in the data folder. Start with --log-level DEBUG to see every lookup."),
+    box);
+  await load();
+  pollTimer = setInterval(() => load().catch(() => {}), 2000);
 }
 
 // ------------------------------------------------------------------ jobs list

@@ -48,7 +48,17 @@ python run.py                    # opens http://127.0.0.1:8765
 3. Review the plan: fix rows inline or exclude them, then **Review & approve…** → **Start**.
 4. Try **Pause**, edit a pending row, re-approve, **Resume**. Afterwards try **Create rollback…**.
 
-Options: `--port 8765`, `--data-dir ./data`, `--no-browser`, `--debug` (or `AMT_PORT`, `AMT_DATA_DIR`).
+Options: `--port 8765`, `--data-dir ./data`, `--no-browser`, `--log-level DEBUG|INFO|WARNING|ERROR`,
+`--debug` (same as `--log-level DEBUG`) — or `AMT_PORT`, `AMT_DATA_DIR`, `AMT_LOG_LEVEL`.
+
+### Logs
+
+The backend logs to the console, to `logs/toolkit.log` in the data folder (rotated at 5 MB, 5 files
+kept) and to the **Logs** page in the UI (live tail with a level filter). At `INFO` you see every change
+request to this server, every job event (plan, approve, each row's outcome, pauses, failures), token
+refreshes, throttling and retries against the target system. At `DEBUG` you also see every call to the
+target system (method, path, status, duration), every connector lookup with its arguments and result
+count, and the UI's polling requests. Request bodies, headers, tokens and secrets are never logged.
 From a source checkout the data folder defaults to `./data`. `python -m amtoolkit` works too.
 
 ## How a bulk job works
@@ -248,6 +258,7 @@ amtoolkit/
   service.py               use cases and safety rules (edit, approve, rollback…)
   engine.py                background runners: plan / execute / pause / cancel / crash recovery
   store.py, db.py          SQLite persistence (WAL), job & item state machine, audit log
+  logs.py                  Backend logging: console, rotating file, in-memory buffer for the Logs page
   csvio.py                 CSV parsing/export
   actions/                 bulk actions (CSV schema → plan → execute → rollback):
                            access profiles and governance groups; experimental.py for the rest

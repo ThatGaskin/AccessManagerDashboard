@@ -1,6 +1,11 @@
 """Data access for connections, jobs, items and the audit log."""
+import logging
+
 from .db import Database
 from .util import dumps, fingerprint, loads, new_id, now_iso
+
+audit_log = logging.getLogger("amtoolkit.audit")
+_LOG_LEVELS = {"info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR}
 
 # Job lifecycle:
 #   planning -> review -> approved -> running <-> pausing -> paused -> (approved again) -> running -> completed
@@ -294,6 +299,8 @@ class Store:
 
     # ---------------------------------------------------------------- audit log
     def add_event(self, job_id, level, kind, message, item_id=None, data=None):
+        # Every audit event also goes to the backend log, so one file tells the whole story.
+        audit_log.log(_LOG_LEVELS.get(level, logging.INFO), "job %s [%s] %s", job_id, kind, message)
         with self.db.tx() as c:
             c.execute("INSERT INTO events (job_id, item_id, ts, level, kind, message, data) "
                       "VALUES (?, ?, ?, ?, ?, ?, ?)",

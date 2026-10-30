@@ -9,12 +9,13 @@ import hmac
 import logging
 import mimetypes
 import secrets
+import time
 from importlib import resources
 from pathlib import Path
 
-from flask import Flask, Response, abort, jsonify, request
+from flask import Flask, Response, abort, g, jsonify, request
 
-from . import __version__
+from . import __version__, logs
 from .actions import ACTIONS, get_action
 from .connectors import ENVIRONMENTS, ConnectorError, kinds_metadata
 from .csvio import CsvError, template
@@ -45,6 +46,10 @@ def create_app(data_dir, *, allowed_hosts=None):
 
     # ------------------------------------------------------------------ security
     @app.before_request
+    def started():
+        g.started = time.monotonic()
+
+    @app.before_request
     def guard():
         host = (request.host or "").rsplit(":", 1)[0] if not request.host.startswith("[") \
             else request.host.split("]")[0] + "]"
@@ -66,6 +71,12 @@ def create_app(data_dir, *, allowed_hosts=None):
         resp.headers["Referrer-Policy"] = "no-referrer"
         if request.path.startswith("/api/"):
             resp.headers["Cache-Control"] = "no-store"
+        if request.path.startswith("/api/") and request.path != "/api/logs":
+            # Changes are logged at INFO; the UI's polling GETs only at DEBUG so they do not drown them out.
+            level = logging.WARNING if resp.status_code >= 400 else \
+                logging.DEBUG if request.method == "GET" else logging.INFO
+            log.log(level, "%s %s -> %s (%.0f ms)", request.method, request.full_path.rstrip("?"),
+                    resp.status_code, (time.monotonic() - g.get("started", time.monotonic())) * 1000)
         return resp
 
     @app.errorhandler(NotFound)
@@ -310,6 +321,11 @@ def create_app(data_dir, *, allowed_hosts=None):
         else:
             abort(404)
         return jsonify(toolkit.job_view(job_id))
+
+    @app.get("/api/logs")
+    def backend_logs():
+        return jsonify(logs.memory.since(request.args.get("after", 0, type=int), request.args.get("level", "DEBUG"),
+                                         min(2000, request.args.get("limit", 500, type=int))))
 
     @app.get("/api/jobs/<job_id>/events")
     def events(job_id):
