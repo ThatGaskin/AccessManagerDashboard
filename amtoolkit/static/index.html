@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{CSRF_TOKEN}}">
+  <title>Access Manager Toolkit</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232563eb'/%3E%3Cpath d='M5 7V5a3 3 0 0 1 6 0v2h1v6H4V7zm2 0h2V5a1 1 0 0 0-2 0z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">Access Manager Toolkit</a>
+    <nav>
+      <a href="#/" data-nav="jobs">Jobs</a>
+      <a href="#/new" data-nav="new">New job</a>
+      <a href="#/connections" data-nav="connections">Connections</a>
+    </nav>
+    <span class="muted small" id="operator"></span>
+  </header>
+  <main id="view" aria-live="polite"></main>
+  <div id="toasts" role="status"></div>
+  <dialog id="modal"><div id="modal-body"></div></dialog>
+  <script src="/static/app.js"></script>
+</body>
+</html>
