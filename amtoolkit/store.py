@@ -192,17 +192,36 @@ class Store:
     }
     ITEM_FILTERS.update({op: f"AND included = 1 AND op = '{op}'" for op in EXECUTABLE_OPS})
 
-    def list_items(self, job_id, filter_name="all", q="", offset=0, limit=100):
+    def _item_where(self, job_id, filter_name, q, attribute):
         where = self.ITEM_FILTERS.get(filter_name, "")
         params = [job_id]
         if q:
             where += " AND (input LIKE ? OR target LIKE ? OR remote_id LIKE ?)"
             like = f"%{q}%"
             params += [like, like, like]
+        if attribute:  # rows whose planned update changes this attribute
+            where += " AND json_valid(payload) AND EXISTS (SELECT 1 FROM json_each(payload, '$.after') WHERE key = ?)"
+            params.append(attribute)
+        return where, params
+
+    def list_items(self, job_id, filter_name="all", q="", offset=0, limit=100, attribute=None):
+        where, params = self._item_where(job_id, filter_name, q, attribute)
         total = self.db.query_one(f"SELECT COUNT(*) FROM items WHERE job_id = ? {where}", tuple(params))[0]
         rows = self.db.query(f"SELECT * FROM items WHERE job_id = ? {where} ORDER BY row_no LIMIT ? OFFSET ?",
                              (*params, limit, offset))
         return total, [_item(r) for r in rows]
+
+    def matching_item_ids(self, job_id, filter_name="all", q="", attribute=None):
+        """IDs of the rows a filter matches that can still be included or excluded."""
+        where, params = self._item_where(job_id, filter_name, q, attribute)
+        return [r[0] for r in self.db.query(f"SELECT id FROM items WHERE job_id = ? {where} "
+                                            f"AND status IN ('pending', 'failed') ORDER BY row_no", tuple(params))]
+
+    def changed_attributes(self, job_id):
+        """{attribute: number of rows whose planned update changes it}, for filtering copy jobs."""
+        rows = self.db.query("SELECT a.key AS attr, COUNT(*) AS n FROM items, json_each(items.payload, '$.after') a "
+                             "WHERE items.job_id = ? AND json_valid(items.payload) GROUP BY a.key", (job_id,))
+        return {r["attr"]: r["n"] for r in rows}
 
     def all_items(self, job_id):
         return [_item(r) for r in self.db.query("SELECT * FROM items WHERE job_id = ? ORDER BY row_no", (job_id,))]
@@ -235,11 +254,15 @@ class Store:
                       "updated_at = ? WHERE id = ?", (dumps(new_input), now_iso(), item_id))
 
     def set_included(self, job_id, item_ids, included):
-        marks = ",".join("?" * len(item_ids))
+        changed = 0
         with self.db.tx() as c:
-            cur = c.execute(f"UPDATE items SET included = ?, updated_at = ? WHERE job_id = ? AND id IN ({marks}) "
-                            f"AND status IN ('pending', 'failed')", (int(included), now_iso(), job_id, *item_ids))
-            return cur.rowcount
+            for start in range(0, len(item_ids), 500):  # stays under SQLite's limit on bound parameters
+                chunk = item_ids[start:start + 500]
+                marks = ",".join("?" * len(chunk))
+                changed += c.execute(f"UPDATE items SET included = ?, updated_at = ? WHERE job_id = ? "
+                                     f"AND id IN ({marks}) AND status IN ('pending', 'failed')",
+                                     (int(included), now_iso(), job_id, *chunk)).rowcount
+        return changed
 
     def message_values(self, job_id, code):
         """Distinct `value`s of messages with the given code on included rows, e.g. missing group names."""

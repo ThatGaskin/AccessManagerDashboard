@@ -500,3 +500,30 @@ def test_marking_an_attribute_environment_specific(toolkit, envs, client):
     for attr in ("config.password", "nonsense"):
         assert client.put("/api/env-marks", json={"object_type": "source", "attribute": attr,
                                                   "env_specific": True}).status_code == 400
+
+
+def test_job_rows_filter_by_changed_attribute_and_select_all_matching(toolkit, envs, client):
+    test, prod = envs
+    t = conn(toolkit, test)
+    for i in range(3):
+        make_profile(t, f"Bulk {i}", ALICE, ["Finance-Read"])
+        make_profile(conn(toolkit, prod), f"Bulk {i}", prod_id(ALICE), ["Finance-Read"])
+        ap = t.find_objects("access_profile", f"Bulk {i}")[0]["id"]
+        t.patch_object("access_profile", ap, {"description": f"new {i}", **({"requestable": False} if i else {})})
+    compare_id = toolkit.compare.start(test["id"], prod["id"], "access_profile")
+    result = wait_for(lambda: (r := toolkit.compare.get(compare_id))["status"] == "completed" and r)
+    rows = [r for r in result["rows"] if r["name"].startswith("Bulk")]
+    job_id = toolkit.create_copy_job(compare_id, [
+        {"source_id": r["source_id"], "attributes": [d["attr"] for d in r["diffs"]]} for r in rows])
+    wait_for(lambda: toolkit.store.get_job(job_id)["status"] == "review")
+
+    res = client.get(f"/api/jobs/{job_id}/items").get_json()
+    assert res["attributes"] == {"description": 3, "requestable": 2}
+    res = client.get(f"/api/jobs/{job_id}/items?attribute=requestable&q=Bulk").get_json()
+    assert res["total"] == 2 and {i["target"] for i in res["items"]} == {"Bulk 1", "Bulk 2"}
+    ids = client.get(f"/api/jobs/{job_id}/items/ids?attribute=requestable").get_json()["ids"]
+    assert sorted(ids) == sorted(i["id"] for i in res["items"])
+    assert toolkit.set_included(job_id, ids, False) == 2
+    assert toolkit.store.job_counts(job_id)["excluded"] == 2
+    # Thousands of IDs at once are written in chunks
+    assert toolkit.store.set_included(job_id, list(range(-5000, 0)) + ids, True) == 2

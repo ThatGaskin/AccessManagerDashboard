@@ -57,6 +57,7 @@ async function guarded(fn) {
 }
 
 function fmtTime(iso) { return iso ? new Date(iso).toLocaleString() : ""; }
+const fmtN = (n) => Number(n || 0).toLocaleString();
 
 const STATUS_BADGE = {
   planning: "b-info", review: "b-warn", approved: "b-info", running: "b-info", pausing: "b-warn",
@@ -414,10 +415,17 @@ const FILTERS = [
 ];
 
 async function renderJob(jobId) {
-  const state = { job: null, filter: "all", q: "", offset: 0, limit: 100, tab: "items", selected: new Set(), sig: "", rate: [] };
+  const state = { job: null, filter: "all", q: "", attribute: "", offset: 0, limit: 100, tab: "items", selected: new Set(), sig: "", rate: [] };
   const header = h("div");
   const body = h("div");
   view.replaceChildren(header, body);
+  // A job can hold thousands of rows: they are searched, filtered and paged on the server. These inputs
+  // survive redraws (the page redraws while a job runs) so typing and focus are not lost.
+  const searchIn = h("input", { type: "search", placeholder: "Search rows…", autocomplete: "off", spellcheck: "false", class: "compare-search" });
+  let searchTimer = null;
+  searchIn.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.q = searchIn.value.trim(); state.offset = 0; renderBody(); }, 250); });
+  const attrSel = h("select", { class: "compare-attr", onchange: () => { state.attribute = attrSel.value; state.offset = 0; renderBody(); } });
+  const query = () => `filter=${state.filter}&q=${encodeURIComponent(state.q)}&attribute=${encodeURIComponent(state.attribute)}`;
 
   const loadJob = async () => {
     state.job = await api("GET", `/api/jobs/${jobId}`);
@@ -509,7 +517,7 @@ async function renderJob(jobId) {
       h("div", { class: "row spread" },
         h("div", { class: "stats" },
           [["Rows", c.total], ["Included", c.included], ["Succeeded", c.status.succeeded], ["Skipped", c.status.skipped], ["Failed", c.status.failed], ["Remaining", c.remaining]]
-            .map(([l, n]) => h("div", { class: "stat" }, h("b", {}, n), h("span", { class: "muted small" }, l)))),
+            .map(([l, n]) => h("div", { class: "stat" }, h("b", {}, fmtN(n)), h("span", { class: "muted small" }, l)))),
         h("div", { class: "muted small" }, eta)),
       h("div", { class: "row", style: "margin-top:12px" }, buttons)));
   }
@@ -517,24 +525,39 @@ async function renderJob(jobId) {
   async function renderBody() {
     const tabs = h("div", { class: "tabs" },
       [["items", "Rows"], ["log", "Activity & audit log"]].map(([k, l]) => h("button", { class: state.tab === k ? "active" : "", onclick: () => { state.tab = k; renderBody(); } }, l)));
+    const focused = document.activeElement;
     const content = state.tab === "items" ? await itemsPanel() : await logPanel();
     body.replaceChildren(h("div", { class: "panel" }, tabs, content));
+    if ((focused === searchIn || focused === attrSel) && document.activeElement !== focused) focused.focus();
   }
 
   async function itemsPanel() {
     const j = state.job; const c = j.counts;
-    const res = await api("GET", `/api/jobs/${jobId}/items?filter=${state.filter}&q=${encodeURIComponent(state.q)}&offset=${state.offset}&limit=${state.limit}`);
+    const res = await api("GET", `/api/jobs/${jobId}/items?${query()}&offset=${state.offset}&limit=${state.limit}`);
     const editable = j.allowed.edit;
     const chips = h("div", { class: "chips" }, FILTERS.filter(([k, , f]) => k === "all" || f(c) > 0).map(([k, l, f]) =>
-      h("button", { class: "chip" + (state.filter === k ? " active" : ""), onclick: () => { state.filter = k; state.offset = 0; state.selected.clear(); renderBody(); } }, `${l} (${f(c)})`)));
-    const search = h("input", { placeholder: "Search rows…", value: state.q, style: "max-width:260px" });
-    search.addEventListener("keydown", (e) => { if (e.key === "Enter") { state.q = search.value; state.offset = 0; renderBody(); } });
+      h("button", { class: "chip" + (state.filter === k ? " active" : ""), onclick: () => { state.filter = k; state.offset = 0; renderBody(); } }, `${l} (${fmtN(f(c))})`)));
+    // Copy jobs: filter by the attribute a planned update changes, most common first
+    const attrs = Object.entries(res.attributes || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    if (state.attribute && !res.attributes[state.attribute]) state.attribute = "";
+    attrSel.replaceChildren(h("option", { value: "" }, "Any change"),
+      ...attrs.map(([a, n]) => h("option", { value: a, selected: a === state.attribute }, `Changes ${a} (${fmtN(n)})`)));
+    attrSel.hidden = !attrs.length;
     const selectedIds = () => [...state.selected];
+    const selectMatching = () => guarded(async () => {
+      const { ids } = await api("GET", `/api/jobs/${jobId}/items/ids?${query()}`);
+      ids.forEach((id) => state.selected.add(id));
+      renderBody();
+    });
+    const n = fmtN(state.selected.size);
     const bulkBar = editable ? h("div", { class: "row" },
       h("button", { disabled: !c.errors, onclick: () => bulk("exclude_errors") }, "Exclude rows with errors"),
       h("button", { disabled: !c.excluded, onclick: () => bulk("include_all") }, "Include all"),
-      h("button", { disabled: !state.selected.size, onclick: () => setIncluded(selectedIds(), false) }, `Exclude selected (${state.selected.size})`),
-      h("button", { disabled: !state.selected.size, onclick: () => setIncluded(selectedIds(), true) }, "Include selected")) : null;
+      h("button", { disabled: !state.selected.size, onclick: () => setIncluded(selectedIds(), false) }, `Exclude selected (${n})`),
+      h("button", { disabled: !state.selected.size, onclick: () => setIncluded(selectedIds(), true) }, `Include selected (${n})`)) : null;
+    const selectBar = editable && res.total ? h("div", { class: "row small" },
+      h("button", { onclick: selectMatching, title: "Select every row these filters match, on all pages (rows that already ran are skipped)" }, `Select all ${fmtN(res.total)} matching`),
+      state.selected.size ? [h("span", { class: "muted" }, `${n} selected`), h("button", { onclick: () => { state.selected.clear(); renderBody(); } }, "Clear selection")] : null) : null;
 
     const canSelect = (i) => editable && ["pending", "failed"].includes(i.status);
     const allBox = h("input", { type: "checkbox", title: "Select page", disabled: !editable, onchange: (e) => { res.items.filter(canSelect).forEach((i) => e.target.checked ? state.selected.add(i.id) : state.selected.delete(i.id)); renderBody(); } });
@@ -550,18 +573,27 @@ async function renderJob(jobId) {
         h("td", {}, badge(status), i.error ? h("div", { class: "small", style: "color:var(--err)" }, i.error) : null),
         h("td", { class: "mono" }, i.remote_id || ""));
     });
-    const pages = Math.ceil(res.total / state.limit);
+    const pages = Math.max(1, Math.ceil(res.total / state.limit));
     const page = Math.floor(state.offset / state.limit) + 1;
+    if (page > pages && res.total) { state.offset = (pages - 1) * state.limit; return itemsPanel(); } // rows left the filter
+    const listTop = h("div");
+    const goTo = (p) => { state.offset = (p - 1) * state.limit; renderBody().then(() => listTop.scrollIntoView({ block: "start" })); };
+    const pager = () => pages > 1 ? h("div", { class: "row pager small" },
+      h("button", { disabled: page <= 1, onclick: () => goTo(1) }, "«"),
+      h("button", { disabled: page <= 1, onclick: () => goTo(page - 1) }, "‹ Previous"),
+      h("span", {}, `Page ${fmtN(page)} of ${fmtN(pages)}`),
+      h("button", { disabled: page >= pages, onclick: () => goTo(page + 1) }, "Next ›"),
+      h("button", { disabled: page >= pages, onclick: () => goTo(pages) }, "»")) : null;
     return h("div", {},
       h("div", { class: "row spread" }, chips),
-      h("div", { class: "row spread", style: "margin-bottom:8px" }, search, bulkBar),
+      h("div", { class: "row compare-tools" }, searchIn, attrSel,
+        h("span", { class: "small muted" }, res.total ? `${fmtN(state.offset + 1)}–${fmtN(state.offset + res.items.length)} of ${fmtN(res.total)}` : "0 of 0")),
+      selectBar || bulkBar ? h("div", { class: "row spread", style: "margin-bottom:8px" }, selectBar || h("span"), bulkBar) : null,
+      listTop, pager(),
       res.items.length ? h("table", {},
         h("thead", {}, h("tr", {}, h("th", {}, allBox), h("th", {}, "Line"), h("th", {}, "Target"), h("th", {}, "Planned"), h("th", {}, "Validation"), h("th", {}, "Status"), h("th", {}, "Remote ID"))),
-        h("tbody", {}, rows)) : h("div", { class: "empty" }, j.status === "planning" ? "Planning…" : "No rows match this filter"),
-      pages > 1 ? h("div", { class: "pager" },
-        h("button", { disabled: page <= 1, onclick: () => { state.offset -= state.limit; renderBody(); } }, "‹ Prev"),
-        h("span", { class: "small muted" }, `Page ${page} of ${pages} · ${res.total} rows`),
-        h("button", { disabled: page >= pages, onclick: () => { state.offset += state.limit; renderBody(); } }, "Next ›")) : null);
+        h("tbody", {}, rows)) : h("div", { class: "empty" }, j.status === "planning" ? "Planning…" : "No rows match these filters"),
+      pager());
   }
 
   async function bulk(op) {
@@ -1361,8 +1393,6 @@ function historyDialog({ type, title, attribute, sides }) {
 
 const COMPARE_PAGE = 50; // objects per page of a comparison
 const ONLY_IN_TARGET_SHOWN = 30;
-const fmtN = (n) => Number(n || 0).toLocaleString();
-
 async function renderCompare(compareId) {
   const picked = new Map(); // source_id -> Set of attributes (empty set for new objects)
   const openNew = new Set(); // new objects whose attribute list is expanded, kept open across redraws
