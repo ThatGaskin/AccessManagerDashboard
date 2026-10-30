@@ -7,7 +7,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import model
+from . import demo, model
 from .base import Connector, ConnectorError, Field, Interrupted
 
 SEED = {
@@ -90,6 +90,9 @@ class MockTenant(Connector):
         Field("latency_ms", "Simulated latency (ms)", default="250"),
         Field("failure_rate", "Simulated failure rate (0–1)", default="0.05",
               help="Fraction of create/delete calls that fail with a retryable error."),
+        Field("sample_data", "Sample data", default="standard", choices=["standard", *demo.FLAVORS],
+              help="What a new sandbox starts with. The demo pair (demo-test and demo-production) differs on "
+                   "purpose, to try Copy and Compare."),
     ]
 
     def __init__(self, config, state_path: Path, abort_event=None):
@@ -100,7 +103,12 @@ class MockTenant(Connector):
         self.failure_rate = float(config.get("failure_rate") or 0)
 
     def _state(self):
-        state = json.loads(self.path.read_text("utf-8")) if self.path.exists() else json.loads(json.dumps(SEED))
+        if self.path.exists():
+            state = json.loads(self.path.read_text("utf-8"))
+        elif self.config.get("sample_data") in demo.FLAVORS:
+            state = demo.seed(self.config["sample_data"])
+        else:
+            state = json.loads(json.dumps(SEED))
         for key, value in SEED.items():  # sandboxes created by older versions lack newer collections
             state.setdefault(key, json.loads(json.dumps(value)))
         return state

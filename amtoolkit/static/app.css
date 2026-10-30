@@ -146,6 +146,29 @@ td.val { font-family: var(--mono); font-size: 12px; word-break: break-word; max-
 @media (max-width: 900px) { .copy-pick { grid-template-columns: 1fr 1fr; } }
 .picker-caret { position: absolute; right: 10px; top: 8px; color: var(--muted); pointer-events: none; }
 .picker input { padding-right: 26px; }
-table.copy tr.same td { color: var(--muted); }
+.mark { display: inline-flex; width: 22px; height: 22px; border-radius: 50%; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; line-height: 1; }
+.mark.same { background: var(--ok-bg); color: var(--ok); }
+.mark.diff { background: var(--warn-bg); color: var(--warn); }
+.mark.move { background: var(--hl-orange); color: #fff; }
+.mark.off { background: var(--neutral-bg); color: var(--muted); }
+td.markcell { text-align: center; }
+table.diff { table-layout: fixed; }
+table.diff th:nth-child(1) { width: 28px; } table.diff th:nth-child(2) { width: 26%; } table.diff th:nth-child(4) { width: 40px; }
+table.diff.copy th:nth-child(6) { width: 190px; }
+table.compare-list { table-layout: fixed; }
+table.compare-list > thead th:nth-child(1) { width: 32px; } table.compare-list > thead th:nth-child(2) { width: 190px; }
+table.diff tr.row-same td { color: var(--muted); }
+table.diff tr.row-diff td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+table.diff tr.row-move td:first-child { box-shadow: inset 3px 0 0 var(--hl-orange); }
+table.diff tr.row-move td.after { background: var(--accent-bg); }
+table.diff tr.row-diff td.val:not(.after) { background: var(--warn-bg); }
+.vchip { display: inline-block; padding: 0 6px; margin: 1px 3px 1px 0; border-radius: 3px; border: 1px solid var(--border); font-size: 12px; white-space: nowrap; }
+.vchip.add { background: var(--ok-bg); color: var(--ok); border-color: transparent; font-weight: 600; }
+.vchip.extra { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+.vchip.remove { background: var(--err-bg); color: var(--err); border-color: transparent; text-decoration: line-through; }
+del.v { color: var(--err); background: var(--err-bg); padding: 0 3px; border-radius: 3px; }
+ins.v { color: var(--ok); background: var(--ok-bg); text-decoration: none; padding: 0 3px; border-radius: 3px; font-weight: 600; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; margin: 4px 0 8px; }
+.legend > span { display: inline-flex; align-items: center; gap: 4px; }
 table.copy input.override { font-size: 12px; padding: 3px 6px; }
 [hidden] { display: none !important; }

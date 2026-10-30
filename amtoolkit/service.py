@@ -78,6 +78,26 @@ class Toolkit:
         log.info("Connection '%s' (%s, %s) %s", name, kind, environment, "updated" if conn_id else "created")
         return self.connection_view(conn)
 
+    DEMO = (("Demo Test", "test", "demo-test"), ("Demo Prod", "production", "demo-production"))
+
+    def create_demo_environments(self):
+        """Two sandbox connections whose data differs on purpose, for trying Copy and Compare. Running it
+        again resets their data to the start."""
+        existing = {c["name"]: c for c in self.store.list_connections() if c["kind"] == "mock"}
+        busy = [j for j in self.store.list_jobs() if self.engine.is_active(j["id"])
+                and j["connection_id"] in {existing[n]["id"] for n, _, _ in self.DEMO if n in existing}]
+        if busy:
+            raise JobStateError("A job is running on a demo environment; pause it first")
+        out = []
+        for name, environment, flavor in self.DEMO:
+            config = {"latency_ms": "100", "failure_rate": "0", "sample_data": flavor}
+            data = {"name": name, "kind": "mock", "environment": environment, "config": config}
+            conn = self.save_connection(data, existing[name]["id"]) if name in existing else self.save_connection(data)
+            (self.data_dir / f"sandbox_{conn['id']}.json").unlink(missing_ok=True)  # starts again from the demo data
+            out.append(conn)
+        log.info("Demo environments %s", "reset" if existing else "created")
+        return out
+
     def test_connection(self, conn_id):
         connector = self.connections.build(conn_id)
         try:
