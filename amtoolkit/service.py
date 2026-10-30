@@ -5,14 +5,18 @@
 * Rows that already ran cannot be edited. Every edit is recorded in the audit log with before/after values.
 * Production connections require typing the connection name to approve.
 """
+import itertools
 import logging
 from pathlib import Path
 
 from . import csvio
-from .actions import ACTIONS, PlanContext, get_action
+from .actions import ACTIONS, Plan, get_action, msg
 from .connectors import ConnectionManager, KINDS
 from .db import Database
-from .engine import Engine, JobStateError, plan_item, recheck_duplicates
+from .engine import Engine, JobStateError, plan_context, plan_item, recheck_duplicates
+from .actions.copy import COPY_TYPES
+from .compare import CompareRunner, compare_one
+from .connectors import AuthError, ConfigError, ConnectorError, model
 from .reports import REPORTS, ReportRunner
 from .store import EDITABLE_ITEM_STATUSES, NotFound, Store
 from .util import now_iso
@@ -35,6 +39,7 @@ class Toolkit:
         self.engine = Engine(self.store, self.connections)
         self.engine.recover()
         self.reports = ReportRunner(self.db, self.connections)
+        self.compare = CompareRunner(self.connections)
 
     # ---------------------------------------------------------------- connections
     def connection_view(self, conn):
@@ -88,15 +93,26 @@ class Toolkit:
                    rows=None):
         action = get_action(action_key)
         conn = self.store.get_connection(connection_id)
+        options = action.clean_options(options)
+        if action.source_connection:
+            source_id = options.get("source_connection_id")
+            if not source_id:
+                raise ValueError("Choose the connection to copy from")
+            try:
+                source = self.store.get_connection(source_id)
+            except NotFound:
+                raise ValueError("The connection to copy from does not exist") from None
+            if source["id"] == conn["id"]:
+                raise ValueError("Copy from a different connection than the one being changed")
         warnings = []
         if rows is None:
             rows, warnings = csvio.parse(data, action)
         name = (name or "").strip() or f"{action.title} – {Path(filename or 'upload').name}"
-        job_id = self.store.create_job(name[:200], action.key, conn["id"], action.clean_options(options),
-                                       filename, rows, parent_job_id)
+        job_id = self.store.create_job(name[:200], action.key, conn["id"], options, filename, rows, parent_job_id)
+        copying = f", copying from '{source['name']}' ({source['environment']})" if action.source_connection else ""
         self.store.add_event(job_id, "info", "created",
                              f"Job created from {filename or 'generated rows'} with {len(rows)} row(s) "
-                             f"against '{conn['name']}' ({conn['environment']})")
+                             f"against '{conn['name']}' ({conn['environment']}){copying}")
         for warning in warnings:
             self.store.add_event(job_id, "warning", "csv", warning)
         self.store.transition_job(job_id, ("planning",), "review")
@@ -128,6 +144,13 @@ class Toolkit:
             "delete": status not in ("planning", "running", "pausing") and not active,
             "create_groups": bool(missing_groups) and not active,
         }
+        source = None
+        if action and action.source_connection:
+            try:
+                s = self.store.get_connection(job["options"].get("source_connection_id"))
+                source = {"id": s["id"], "name": s["name"], "environment": s["environment"]}
+            except NotFound:
+                source = {"id": None, "name": "(deleted connection)", "environment": ""}
         parent = None
         if job["parent_job_id"]:
             try:
@@ -137,6 +160,7 @@ class Toolkit:
                 pass
         return dict(job, counts=counts, approved=approved, active=active, blockers=blockers, allowed=allowed,
                     missing_governance_groups=missing_groups, new_governance_groups=new_groups, parent=parent,
+                    source_connection=source,
                     action_title=action.title if action else job["action"],
                     experimental=bool(action and action.experimental),
                     connection={"id": conn["id"], "name": conn["name"], "environment": conn["environment"],
@@ -169,7 +193,8 @@ class Toolkit:
     def _replan(self, job, action, item_ids):
         if not item_ids:
             return
-        ctx = PlanContext(self.connections.build(job["connection_id"]))
+        ctx = plan_context(self.connections, job, action)
+        action.seed_context(ctx, self.store.all_items(job["id"]))
         for item_id in item_ids:
             plan_item(self.store, action, ctx, self.store.get_item(job["id"], item_id), job["options"])
         recheck_duplicates(self.store, action, job["id"])
@@ -362,6 +387,114 @@ class Toolkit:
                              f"Created from report '{definition.title}' ({len(rows)} finding(s))"
                              + (f"; filled for all rows: {', '.join(defaults)}" if defaults else ""),
                              data={"report_id": report_id, "defaults": defaults})
+        return job_id
+
+    # ---------------------------------------------------------------- copy one object between environments
+    def list_object_names(self, conn_id, type_, query="", limit=50):
+        """Names of objects of a type for the object picker: the first `limit`, or those containing `query`."""
+        if type_ not in COPY_TYPES:
+            raise ValueError("Unknown object type")
+        connector = self.connections.build(conn_id)
+        query = (query or "").strip()
+        if query:
+            names = [s["value"] for s in connector.suggest(f"object:{type_}", query, None, limit)]
+        else:
+            names = [o["name"] for o in itertools.islice(connector.list_objects(type_, limit=limit), limit)]
+        return sorted(dict.fromkeys(n for n in names if n), key=str.lower)
+
+    def copy_request(self, data):
+        """Validates a copy request from the Copy page: two different connections, a type and an object."""
+        data = data or {}
+        type_ = data.get("object_type")
+        if type_ not in COPY_TYPES:
+            raise ValueError("Choose an object type")
+        source = self.store.get_connection(str(data.get("source_connection_id") or ""))
+        target = self.store.get_connection(str(data.get("connection_id") or ""))
+        if source["id"] == target["id"]:
+            raise ValueError("Choose two different connections")
+        obj = str(data.get("object") or "").strip()
+        if not obj:
+            raise ValueError("Choose an object")
+        attributes = [str(a) for a in data.get("attributes") or [] if str(a).strip()]
+        overrides = {}
+        for key, value in (data.get("overrides") or {}).items():
+            value = str(value or "").strip()
+            if value and (";" in value or "\n" in value):
+                raise ValueError(f"The value for {key} cannot contain ';' or line breaks")
+            if value:
+                overrides[str(key)] = value
+        return {"source_connection_id": source["id"], "connection_id": target["id"], "object_type": type_,
+                "object": obj, "attributes": attributes, "overrides": overrides}
+
+    def copy_preview(self, data):
+        """Every copyable attribute of one object, its value in both environments and whether they match."""
+        req = self.copy_request(data)
+        return compare_one(self.connections.build(req["source_connection_id"]),
+                           self.connections.build(req["connection_id"]), req["object_type"], req["object"])
+
+    def _copy_row(self, req):
+        action = get_action("object.copy")
+        return action.normalize({"object_type": req["object_type"], "object": req["object"],
+                                 "attributes": ";".join(req["attributes"]),
+                                 "overrides": ";".join(f"{k}={v}" for k, v in req["overrides"].items())})
+
+    def plan_copy(self, req):
+        """Plans copying one object without creating a job: what would change, read-only."""
+        action = get_action("object.copy")
+        ctx = plan_context(self.connections, {"options": {"source_connection_id": req["source_connection_id"]},
+                                              "connection_id": req["connection_id"]}, action)
+        try:
+            return action.plan(ctx, self._copy_row(req), {"if_missing": "create"})
+        except (AuthError, ConfigError):
+            raise
+        except ConnectorError as exc:
+            return Plan("error", req["object"], None, [msg("error", f"Lookup failed: {exc}", None, "lookup_failed")])
+
+    def start_copy_job(self, req):
+        """The job that records a move from the Copy page. Planned (waited for) but not approved or started."""
+        source = self.store.get_connection(req["source_connection_id"])
+        target = self.store.get_connection(req["connection_id"])
+        label = model.TYPE_LABELS[req["object_type"]].lower()
+        job_id = self.create_job(name=f"Copy {label} {req['object']} from {source['name']} to {target['name']}",
+                                 action_key="object.copy", connection_id=target["id"],
+                                 options={"source_connection_id": source["id"], "if_missing": "create"},
+                                 filename="Copy page", data=None, rows=[(1, self._copy_row(req))])
+        self.engine.wait(job_id)
+        [item] = self.store.all_items(job_id)
+        if item["target"]:  # the request names the object by its ID; the plan knows its name
+            self.store.update_job(job_id, name=f"Copy {label} {item['target']} from {source['name']} to "
+                                               f"{target['name']}"[:200])
+        return job_id
+
+    def create_copy_job(self, compare_id, selections, name=None):
+        """Turns the objects and attributes chosen on a comparison into a 'Copy objects between environments'
+        job. selections: [{"source_id": ..., "attributes": [...]}]; attributes are ignored for objects that do
+        not exist in the target yet (they are created with every copyable attribute)."""
+        result = self.compare.get(compare_id)
+        if result["status"] != "completed":
+            raise JobStateError("The comparison has not finished")
+        by_id = {r["source_id"]: r for r in result["rows"]}
+        action = get_action("object.copy")
+        rows = []
+        for sel in selections or []:
+            row = by_id.get((sel or {}).get("source_id"))
+            if row is None or row["status"] not in ("new", "different"):
+                continue
+            attributes = [str(a) for a in sel.get("attributes") or []] if row["status"] == "different" else []
+            if row["status"] == "different" and not attributes:
+                continue
+            rows.append((len(rows) + 1, action.normalize({"object_type": result["type"], "object": row["source_id"],
+                                                          "attributes": ";".join(attributes)})))
+        if not rows:
+            raise ValueError("Choose at least one object (and, for existing ones, at least one attribute)")
+        title = name or (f"Copy {result['type_label'].lower()}s from {result['source']['name']} to "
+                         f"{result['target']['name']}")
+        job_id = self.create_job(name=title, action_key=action.key, connection_id=result["target"]["id"],
+                                 options={"source_connection_id": result["source"]["id"], "if_missing": "create"},
+                                 filename=f"comparison {compare_id}", data=None, rows=rows)
+        self.store.add_event(job_id, "info", "from_comparison",
+                             f"Created from a comparison of {result['type_label'].lower()}s: {len(rows)} object(s)",
+                             data={"compare_id": compare_id})
         return job_id
 
     def delete_job(self, job_id):

@@ -220,6 +220,49 @@ Members are added right after the group is created. If that step fails, the row 
 ID and **Retry failed** only adds the members to the existing group. Rollback deletes the groups the
 job created. See `examples/governance_groups_sandbox.csv`.
 
+## Copy between environments
+
+Move values from a test tenant to production (or between any two connections) **attribute by attribute**:
+access profiles, roles, governance groups and sources. No CSV involved. Like everything else, it is
+**experimental** and tested only against the offline sandbox.
+
+1. Open **Copy** and choose *From* (e.g. test), *To* (e.g. production) and the object type in the
+   dropdowns, then pick the object from the searchable *Object* dropdown.
+2. Every attribute is listed with its value in both environments. Differences are ticked, matching values
+   are greyed out. Tick or untick the values to move. For sources, environment-specific settings can be
+   given a different value for the target in *Use instead*.
+3. **Move** plans the change read-only and shows exactly what will change (before → after) for you to
+   confirm — on production by typing the connection name. Nothing is sent before that, and if the target
+   changed after you reviewed it, the move is refused and you see the new summary.
+
+Each move is recorded as a job, so it appears on **Jobs** with its audit log, and **Create rollback** on
+that job restores the previous values (or deletes an object the move created). To review many objects
+at once, *Compare all objects of a type* lists every new and different object of a type side by side and
+turns the ticked ones into one job.
+
+**References are matched by name**, because IDs differ between tenants: owners and members by email
+(or username), governance groups, access profiles and sources by name, entitlements by name or value on
+the matching source. Anything that cannot be matched in the target is shown before you confirm, and
+nothing is moved. A referenced object that is missing in the target (say, a new approver group) must be
+copied first.
+
+**Environment-specific settings are kept.** Governance group members, a source's virtual appliance
+cluster and its connection settings (anything that names a host, URL, port, domain, service account,
+search DN, client ID…) are left as they are in the target, and are not copied to new objects, unless
+you tick them (or give a target value in *Use instead*). **Secrets** (passwords, client
+secrets, tokens) are never copied: the API does not return them.
+
+Attributes: access profiles — `description`, `owner`, `requestable`, `enabled`, `approval_schemes`,
+`comments_required`, `denial_comments_required`, `entitlements`; roles — `description`, `owner`,
+`requestable`, `enabled`, `access_profiles`; governance groups — `description`, `owner`, `members`;
+sources — `description`, `owner`, `delete_threshold`, `authoritative`, `management_workgroup`,
+`cluster`, `config.<setting>`. Not covered: role membership criteria, source schemas, provisioning
+policies, correlation and transforms.
+
+API used in addition: `POST/DELETE /v3/sources` and `GET /v3/managed-clusters` (scopes `idn:sources:manage`,
+`idn:managed-cluster:read`) on the target, and read access to the same object types on the source.
+Comparison results are kept in memory until the toolkit restarts.
+
 ## More actions and reports
 
 Like the rest of the toolkit, these are marked **experimental** throughout the UI (top bar, job pages,
@@ -290,8 +333,10 @@ amtoolkit/
   logs.py                  Backend logging: console, rotating file, in-memory buffer for the Logs page
   csvio.py                 CSV parsing/export
   actions/                 bulk actions (CSV schema → plan → execute → rollback):
-                           access profiles and governance groups; experimental.py for the rest
+                           access profiles and governance groups; copy.py copies between environments;
+                           experimental.py for the rest
   reports.py               read-only hygiene reports (experimental)
+  compare.py               read-only side-by-side comparison of two connections
   connectors/              target systems: SailPoint ISC, offline sandbox; resilient HTTP client;
                            model.py normalizes objects and builds JSON Patch updates
   static/                  single-page UI (vanilla JS/CSS, no build step)

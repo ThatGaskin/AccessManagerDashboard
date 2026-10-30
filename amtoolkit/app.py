@@ -359,6 +359,67 @@ def create_app(data_dir, *, allowed_hosts=None):
         return Response(toolkit.export_csv(job_id), mimetype="text/csv",
                         headers={"Content-Disposition": f'attachment; filename="{job["id"]}_results.csv"'})
 
+    # ------------------------------------------------------------------ copy one object (Copy page)
+    @app.get("/api/connections/<conn_id>/objects")
+    def object_names(conn_id):
+        toolkit.store.get_connection(conn_id)
+        return jsonify(toolkit.list_object_names(conn_id, request.args.get("type", ""), request.args.get("q", "")))
+
+    @app.post("/api/copy/preview")
+    def copy_preview():
+        return jsonify(toolkit.copy_preview(body()))
+
+    @app.post("/api/copy/plan")
+    def copy_plan():
+        req = toolkit.copy_request(body())
+        plan = toolkit.plan_copy(req)
+        summary = confirmer.copy_summary(req, plan) if plan.op in ("create", "update") else None
+        return jsonify(op=plan.op, target=plan.target, messages=plan.messages, confirmation=summary)
+
+    @app.post("/api/copy/move")
+    def copy_move():
+        data = body()
+        req = toolkit.copy_request(data)
+        job_id = toolkit.start_copy_job(req)
+        [item] = toolkit.store.all_items(job_id)
+        try:
+            confirmer.verify_copy(req, item, data.get("confirmation"))
+        except ConfirmationRequired:
+            toolkit.delete_job(job_id)  # nothing ran; the values changed since they were reviewed
+            raise
+        toolkit.store.add_event(job_id, "info", "confirmed", "Move confirmed on the Copy page after reviewing the "
+                                                             "summary", data={"command": "move"})
+        typed = (data.get("confirmation") or {}).get("text") if isinstance(data.get("confirmation"), dict) else None
+        toolkit.approve(job_id, toolkit.store.plan_fingerprint(job_id), typed, operator)
+        toolkit.engine.start(job_id)
+        return jsonify(toolkit.job_view(job_id)), 201
+
+    # ------------------------------------------------------------------ compare environments (read-only)
+    @app.post("/api/compare")
+    def start_compare():
+        data = body()
+        compare_id = toolkit.compare.start(data.get("source_connection_id", ""), data.get("connection_id", ""),
+                                           data.get("object_type", ""))
+        return jsonify(id=compare_id), 201
+
+    @app.get("/api/compare/<compare_id>")
+    def get_compare(compare_id):
+        return jsonify(toolkit.compare.get(compare_id))
+
+    @app.post("/api/compare/<compare_id>/cancel")
+    def cancel_compare(compare_id):
+        toolkit.compare.get(compare_id)
+        toolkit.compare.cancel(compare_id)
+        return jsonify(ok=True)
+
+    @app.post("/api/compare/<compare_id>/create-job")
+    def create_job_from_compare(compare_id):
+        data = body()
+        selections = data.get("selections")
+        job_id = toolkit.create_copy_job(compare_id, selections if isinstance(selections, list) else [],
+                                         (data.get("name") or "").strip() or None)
+        return jsonify(id=job_id), 201
+
     # ------------------------------------------------------------------ reports (experimental, read-only)
     @app.get("/api/reports")
     def list_reports():

@@ -132,6 +132,9 @@ const routes = [
   [/^#\/new(?:\?action=([\w.]+))?$/, renderNewJob],
   [/^#\/connections$/, renderConnections],
   [/^#\/reports$/, renderReports],
+  [/^#\/copy$/, renderCopy],
+  [/^#\/compare$/, renderCompareForm],
+  [/^#\/compare\/([\w-]+)$/, renderCompare],
   [/^#\/reports\/([\w-]+)$/, renderReport],
   [/^#\/jobs\/([\w-]+)$/, renderJob],
   [/^#\/logs$/, renderLogs],
@@ -145,7 +148,7 @@ async function route() {
   document.querySelectorAll("[data-nav]").forEach((a) => {
     const nav = a.dataset.nav;
     a.classList.toggle("active", (nav === "jobs" && (hash === "#/" || hash.startsWith("#/jobs"))) ||
-      hash.split("?")[0] === "#/" + nav);
+      hash.split("?")[0] === "#/" + nav || (nav === "copy" && hash.startsWith("#/compare")));
   });
   for (const [re, fn] of routes) {
     const m = hash.match(re);
@@ -242,7 +245,8 @@ async function renderNewJob(presetAction) {
     return;
   }
   const opt = (a) => h("option", { value: a.key, selected: a.key === presetAction }, a.title);
-  const tested = META.actions.filter((a) => !a.experimental), untested = META.actions.filter((a) => a.experimental);
+  const listed = META.actions.filter((a) => !a.hidden);
+  const tested = listed.filter((a) => !a.experimental), untested = listed.filter((a) => a.experimental);
   const actionSel = h("select", { name: "action" },
     tested.length ? h("optgroup", { label: "Tested" }, tested.map(opt)) : null,
     untested.length ? h("optgroup", { label: "Experimental — not yet tested on a real tenant" }, untested.map(opt)) : null);
@@ -265,7 +269,9 @@ async function renderNewJob(presetAction) {
   const refresh = () => {
     const action = META.actions.find((a) => a.key === actionSel.value);
     optsBox.replaceChildren(...action.options.map((o) => h("label", { class: "field" }, h("span", {}, o.label, h("div", { class: "help" }, o.help)),
-      h("select", { name: "opt_" + o.name }, o.choices.map((c) => h("option", { value: c, selected: c === o.default }, c))))));
+      o.kind === "connection"
+        ? h("select", { name: "opt_" + o.name }, conns.filter((c) => c.id !== connSel.value).map((c) => h("option", { value: c.id }, `${c.name} (${c.environment})`)))
+        : h("select", { name: "opt_" + o.name }, o.choices.map((c) => h("option", { value: c, selected: c === o.default }, c))))));
     docs.replaceChildren(
       h("h2", {}, action.title, action.experimental ? experimentalBadge() : null), h("p", { class: "muted" }, action.description),
       action.experimental ? experimentalBanner() : null,
@@ -489,7 +495,9 @@ async function renderJob(jobId) {
 
     header.replaceChildren(h("div", { class: "panel" },
       h("div", { class: "row spread" },
-        h("div", {}, h("h1", {}, j.name), h("div", { class: "muted small" }, `${j.action_title} · `, j.connection.name, " ", envBadge(j.connection.environment), j.source_file ? ` · ${j.source_file}` : "", ` · created ${fmtTime(j.created_at)}`,
+        h("div", {}, h("h1", {}, j.name), h("div", { class: "muted small" }, `${j.action_title} · `,
+          j.source_connection ? h("span", {}, "from ", j.source_connection.name, " ", j.source_connection.environment ? envBadge(j.source_connection.environment) : null, " to ") : null,
+          j.connection.name, " ", envBadge(j.connection.environment), j.source_file ? ` · ${j.source_file}` : "", ` · created ${fmtTime(j.created_at)}`,
           j.parent ? h("span", {}, " · created from ", h("a", { href: `#/jobs/${j.parent.id}` }, j.parent.name)) : null)),
         h("div", { class: "row" }, j.experimental ? experimentalBadge() : null, badge(j.status))),
       h("div", { class: "stepper" }, steps.map(([label], i) => h("div", { class: "step " + (i < currentIdx || j.status === "completed" ? "done" : i === currentIdx ? "current" : "") }, label))),
@@ -972,6 +980,319 @@ async function renderReport(reportId) {
     return running;
   };
   if (await load()) pollTimer = setInterval(async () => { if (!(await load().catch(() => false))) { clearInterval(pollTimer); pollTimer = null; } }, 1500);
+}
+
+// ------------------------------------------------------------------ copy one object
+// Pick an object in one environment, tick the values to move, and move them to the other. The move is
+// planned read-only first and confirmed against exactly that plan; it is recorded as a job so the audit
+// log and rollback work as for every other change.
+
+// Dropdown of object names that can be searched: opens with the first names, filters as you type.
+function objectDropdown(placeholder, load, onChoose) {
+  const input = h("input", { placeholder, autocomplete: "off", spellcheck: "false" });
+  const list = h("ul", { class: "picker-list", role: "listbox" });
+  list.hidden = true;
+  let timer = null, seq = 0;
+  const choose = (name) => { input.value = name; list.hidden = true; onChoose(name); };
+  const fill = async () => {
+    const mine = ++seq;
+    let names = [];
+    try { names = await load(input.value.trim()); } catch (e) { toast(e.message, true); }
+    if (mine !== seq) return;
+    list.replaceChildren(...(names.length ? names.map((n) => h("li", { role: "option", tabindex: "0",
+      onmousedown: (e) => { e.preventDefault(); choose(n); },
+      onkeydown: (e) => {
+        if (e.key === "Enter") { e.preventDefault(); choose(n); }
+        if (e.key === "ArrowDown" && e.target.nextSibling) e.target.nextSibling.focus();
+        if (e.key === "ArrowUp") (e.target.previousSibling || input).focus();
+        if (e.key === "Escape") { list.hidden = true; input.focus(); }
+      } }, n)) : [h("li", { class: "muted small" }, "Nothing found")]));
+    list.hidden = false;
+  };
+  input.addEventListener("focus", fill);
+  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(fill, 250); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" && !list.hidden && list.firstChild && list.firstChild.tabIndex === 0) { e.preventDefault(); list.firstChild.focus(); }
+    if (e.key === "Escape") list.hidden = true;
+  });
+  input.addEventListener("blur", () => setTimeout(() => { if (!list.contains(document.activeElement)) list.hidden = true; }, 150));
+  return { el: h("div", { class: "picker" }, input, h("span", { class: "picker-caret", "aria-hidden": "true" }, "▾"), list),
+    clear: () => { input.value = ""; list.hidden = true; } };
+}
+
+async function renderCopy() {
+  const conns = await api("GET", "/api/connections");
+  if (conns.length < 2) {
+    showView(h("h1", {}, "Copy between environments"), h("div", { class: "panel empty" },
+      "Add two connections — e.g. your test and production tenants — to copy between them. ", h("a", { href: "#/connections" }, "Go to connections")));
+    return;
+  }
+  const rank = { test: 0, sandbox: 1, production: 2 };
+  const byEnv = [...conns].sort((a, b) => rank[a.environment] - rank[b.environment]);
+  const connOpts = (selected) => conns.map((c) => h("option", { value: c.id, selected: c.id === selected }, `${c.name} (${c.environment})`));
+  const fromSel = h("select", {}, connOpts(byEnv[0].id));
+  const toSel = h("select", {}, connOpts(byEnv[byEnv.length - 1].id));
+  const typeSel = h("select", {}, COPY_TYPES.map(([k, l]) => h("option", { value: k }, l.replace(/s$/, ""))));
+  const result = h("div");
+  const state = { row: null, picked: new Set(), overrides: {} };
+  const connName = (id) => conns.find((c) => c.id === id).name;
+
+  const picker = objectDropdown("Search or pick…", (q) => api("GET", `/api/connections/${fromSel.value}/objects?type=${typeSel.value}&q=${encodeURIComponent(q)}`), (name) => preview(name));
+  const reset = () => { picker.clear(); state.row = null; result.replaceChildren(); };
+  [fromSel, toSel, typeSel].forEach((s) => s.addEventListener("change", reset));
+
+  const request = () => ({ source_connection_id: fromSel.value, connection_id: toSel.value, object_type: typeSel.value,
+    object: state.row.source_id, attributes: [...state.picked],
+    overrides: Object.fromEntries(Object.entries(state.overrides).filter(([k, v]) => v && state.picked.has(k))) });
+
+  async function preview(name, notice) {
+    if (fromSel.value === toSel.value) { toast("Choose two different connections", true); return; }
+    result.replaceChildren(h("div", { class: "panel muted" }, `Reading ${name} in both environments…`));
+    const row = await guarded(() => api("POST", "/api/copy/preview", { source_connection_id: fromSel.value, connection_id: toSel.value, object_type: typeSel.value, object: name }));
+    if (!row) { result.replaceChildren(); return; }
+    state.row = row;
+    state.overrides = {};
+    state.picked = new Set(row.diffs.filter((d) => !d.same && (row.status === "new" ? (!d.env_specific || d.required) : (!d.env_specific && !d.only_in_target))).map((d) => d.attr));
+    draw(notice);
+  }
+
+  function draw(notice) {
+    const row = state.row, from = connName(fromSel.value), to = connName(toSel.value);
+    const isNew = row.status === "new";
+    const differing = row.diffs.filter((d) => !d.same);
+    const canOverride = (d) => typeSel.value === "source" && d.env_specific && (d.kind === "config" || d.kind === "cluster");
+    const toggle = (attr, on) => { on ? state.picked.add(attr) : state.picked.delete(attr); draw(); };
+    const rows = row.diffs.map((d) => {
+      const locked = isNew && d.required;
+      const box = h("input", { type: "checkbox", checked: state.picked.has(d.attr) || locked, disabled: d.same || locked,
+        title: d.same ? "Already the same" : locked ? "Needed to create it" : "", onchange: (e) => toggle(d.attr, e.target.checked) });
+      let override = null;
+      if (canOverride(d)) {
+        override = h("input", { class: "override", value: state.overrides[d.attr] || "", placeholder: d.kind === "cluster" ? `cluster name in ${to}` : `value for ${to}` });
+        override.addEventListener("change", () => { state.overrides[d.attr] = override.value.trim(); if (override.value.trim()) state.picked.add(d.attr); draw(); });
+      }
+      return h("tr", { class: d.same ? "same" : "" },
+        h("td", {}, box),
+        h("td", {}, h("span", { class: "mono" }, d.label),
+          d.env_specific ? h("span", { class: "badge b-warn", title: "Usually differs per environment; left alone unless you tick it" }, "environment-specific") : null,
+          d.only_in_target ? h("span", { class: "badge", title: `Not set in ${from}; moving it removes it from ${to}` }, `only in ${to}`) : null,
+          locked ? h("span", { class: "badge" }, "required") : null),
+        h("td", { class: "val" }, showValue(d.source)),
+        h("td", { class: "val" }, isNew ? h("span", { class: "muted" }, "—") : showValue(d.target), d.same ? h("div", { class: "small muted" }, "same") : null),
+        h("td", {}, override));
+    });
+    const count = state.picked.size;
+    const move = h("button", { class: "primary", disabled: !count, onclick: () => doMove(move) },
+      isNew ? `Create in ${to} with ${count} value(s)` : `Move ${count} value(s) to ${to}`);
+    result.replaceChildren(...[notice].filter(Boolean),
+      h("div", { class: "panel" },
+        h("div", { class: "row spread" },
+          h("div", {}, h("h2", {}, row.name, " ", badge(row.status === "same" ? "same" : isNew ? `new in ${to}` : `${differing.length} difference(s)`,
+            row.status === "same" ? "b-ok" : isNew ? "b-info" : "b-warn")),
+            h("div", { class: "small muted" }, isNew ? `Not in ${to} yet — it will be created there with the ticked values.` :
+              row.status === "same" ? `Every value already matches ${to}.` : `Tick the values to move from ${from} to ${to}.`)),
+          differing.length ? h("div", { class: "row" },
+            h("button", { onclick: () => { differing.forEach((d) => state.picked.add(d.attr)); draw(); } }, "Tick all differences"),
+            h("button", { onclick: () => { state.picked.clear(); draw(); } }, "Untick all")) : null),
+        h("table", { class: "diff copy" },
+          h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Attribute"), h("th", {}, `In ${from}`), h("th", {}, `In ${to}`), h("th", {}, typeSel.value === "source" ? `Use instead in ${to}` : ""))),
+          h("tbody", {}, rows)),
+        row.secrets.length ? h("p", { class: "small muted" }, `Secrets are never copied: ${row.secrets.join(", ")}. Set them in ${to} directly.`) : null),
+      h("div", { class: "panel sticky-actions" }, h("div", { class: "row" }, move,
+        h("span", { class: "small muted" }, "You see exactly what will change and confirm it before anything is sent."))));
+  }
+
+  async function doMove(button) {
+    button.disabled = true;
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const req = request();
+        const planned = await api("POST", "/api/copy/plan", req);
+        if (planned.op !== "create" && planned.op !== "update") {
+          const errors = planned.messages.filter((m) => m.level === "error");
+          result.prepend(h("div", { class: "banner " + (errors.length ? "err" : "info") }, errors.length ? h("strong", {}, "This cannot be moved yet:") : "Nothing to change — the ticked values already match.",
+            errors.length ? h("ul", { class: "notes" }, errors.map((m) => h("li", {}, m.text))) : null));
+          return;
+        }
+        const confirmation = await confirmationDialog(planned.confirmation);
+        if (!confirmation) return;
+        let job;
+        try {
+          job = await api("POST", "/api/copy/move", { ...req, confirmation });
+        } catch (e) {
+          if (e.code !== "confirmation_required") throw e;
+          toast(e.message + " — showing the updated summary", true);
+          continue;
+        }
+        await followMove(job.id, state.row.name);
+        return;
+      }
+    } catch (e) { toast(e.message, true); } finally { button.disabled = false; }
+  }
+
+  async function followMove(jobId, name) {
+    const progress = h("div", { class: "banner info" }, "Moving…");
+    result.prepend(progress);
+    let j;
+    for (let i = 0; i < 120; i++) {
+      j = await api("GET", `/api/jobs/${jobId}`);
+      if (["completed", "paused", "cancelled"].includes(j.status)) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    const ok = j.counts.status.succeeded > 0;
+    const [item] = (await api("GET", `/api/jobs/${jobId}/items?limit=1`)).items;
+    const notice = h("div", { class: "banner " + (ok ? "info" : "err") },
+      h("strong", {}, ok ? `Moved to ${connName(toSel.value)}. ` : "The move did not complete. "),
+      item && item.error ? item.error + " " : "",
+      h("a", { href: `#/jobs/${jobId}` }, "Open the job"), ok ? " — undo it there with Create rollback." : " to see the details and retry.");
+    await preview(name, notice);
+  }
+
+  showView(
+    h("div", { class: "row spread" }, h("div", { class: "row" }, h("h1", {}, "Copy between environments"), experimentalBadge()),
+      h("a", { href: "#/compare" }, "Compare all objects of a type →")),
+    h("div", { class: "panel" }, h("div", { class: "copy-pick" },
+      h("label", { class: "field" }, h("span", {}, "From"), fromSel),
+      h("label", { class: "field" }, h("span", {}, "To ", h("span", { class: "help" }, "— changed")), toSel),
+      h("label", { class: "field" }, h("span", {}, "Type"), typeSel),
+      h("div", { class: "field" }, h("span", { class: "field-label" }, "Object"), picker.el)),
+      h("p", { class: "small muted", style: "margin:0" }, "References are matched by name in the other environment: owners and members by email or username; groups, access profiles and sources by name; entitlements by name or value. Environment-specific values (group members, a source's cluster and connection settings) are left alone unless you tick them. Secrets are never copied.")),
+    result);
+}
+
+// ------------------------------------------------------------------ compare environments
+// Read-only side-by-side view of one object type in two connections. The ticked objects and attributes
+// become a normal "Copy objects between environments" job, planned and reviewed like any other.
+const COPY_TYPES = [["access_profile", "Access profiles"], ["role", "Roles"], ["governance_group", "Governance groups"], ["source", "Sources"]];
+
+async function renderCompareForm() {
+  const conns = await api("GET", "/api/connections");
+  if (conns.length < 2) {
+    showView(h("h1", {}, "Compare environments"), h("div", { class: "panel empty" },
+      "Add two connections — e.g. your test and production tenants — to compare them. ", h("a", { href: "#/connections" }, "Go to connections")));
+    return;
+  }
+  const rank = { test: 0, sandbox: 1, production: 2 };
+  const byEnv = [...conns].sort((a, b) => rank[a.environment] - rank[b.environment]);
+  const connOpts = (selected) => conns.map((c) => h("option", { value: c.id, selected: c.id === selected }, `${c.name} (${c.environment})`));
+  const fromSel = h("select", {}, connOpts(byEnv[0].id));
+  const toSel = h("select", {}, connOpts(byEnv[byEnv.length - 1].id));
+  const typeSel = h("select", {}, COPY_TYPES.map(([k, l]) => h("option", { value: k }, l)));
+  const go = h("button", { class: "primary", type: "submit" }, "Compare");
+  showView(
+    h("div", { class: "row spread" }, h("div", { class: "row" }, h("h1", {}, "Compare environments"), experimentalBadge()),
+      h("a", { href: "#/copy" }, "← Copy one object")),
+    h("p", { class: "muted" }, "Lists one object type in two connections and shows, attribute by attribute, what differs. Read-only: nothing changes until you create a copy job from the result and approve it."),
+    h("div", { class: "grid2" },
+      h("div", { class: "panel" }, h("form", { onsubmit: (e) => { e.preventDefault(); go.disabled = true; guarded(async () => {
+        const res = await api("POST", "/api/compare", { source_connection_id: fromSel.value, connection_id: toSel.value, object_type: typeSel.value });
+        location.hash = `#/compare/${res.id}`;
+      }).finally(() => { go.disabled = false; }); } },
+        h("label", { class: "field" }, h("span", {}, "Copy from ", h("span", { class: "help" }, "— e.g. test")), fromSel),
+        h("label", { class: "field" }, h("span", {}, "Copy to ", h("span", { class: "help" }, "— e.g. production; this is the connection that will be changed")), toSel),
+        h("label", { class: "field" }, h("span", {}, "Object type"), typeSel),
+        go)),
+      h("div", { class: "panel small" }, h("h2", {}, "How copying works"), h("ul", { class: "notes" },
+        h("li", {}, "Objects are matched by name. References are translated by name too: owners and members by email or username, groups, access profiles and sources by name, entitlements by name or value on the matching source."),
+        h("li", {}, "Pick the attributes to copy for objects that exist in both. Objects missing in the target are created with every copyable attribute."),
+        h("li", {}, "Environment-specific attributes — group members, a source's cluster and connection settings such as hosts, URLs and service accounts — are unticked by default and stay as they are in the target."),
+        h("li", {}, "Secrets (passwords, client secrets) are never copied; the API does not return them."),
+        h("li", {}, "The copy job's plan shows the exact before → after of every attribute. Rollback restores previous values and deletes created objects.")))));
+}
+
+function showValue(v) {
+  if (v === null || v === undefined || v === "") return h("span", { class: "muted" }, "(none)");
+  if (typeof v === "boolean") return v ? "yes" : "no";
+  if (Array.isArray(v)) return v.length ? v.join(", ") : h("span", { class: "muted" }, "(none)");
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
+async function renderCompare(compareId) {
+  const picked = new Map(); // source_id -> Set of attributes (empty set for new objects)
+  let filter = "changes";
+  const draw = (r) => {
+    const running = r.status === "running";
+    const counts = { new: 0, different: 0, same: 0, ambiguous: 0 };
+    r.rows.forEach((row) => { counts[row.status] += 1; });
+    const typeLabel = (r.type_label || "").toLowerCase() + "s";
+    const header = [
+      h("div", { class: "row spread" },
+        h("div", {}, h("h1", {}, `Compare ${typeLabel}`), h("div", { class: "small muted" }, r.source.name, " ", envBadge(r.source.environment), " → ", r.target.name, " ", envBadge(r.target.environment), ` · ${fmtTime(r.created_at)} · scanned ${r.scanned} object(s)`)),
+        h("div", { class: "row" }, experimentalBadge(), badge(r.status, r.status === "completed" ? "b-ok" : r.status === "failed" ? "b-err" : "b-info"))),
+      r.error ? h("div", { class: "banner err" }, r.error) : null,
+      running ? h("div", { class: "banner info" }, "Reading both environments (read-only)… ", h("button", { onclick: () => guarded(async () => { await api("POST", `/api/compare/${compareId}/cancel`); }) }, "Cancel")) : null,
+    ];
+    if (r.status !== "completed") { showView(header); return; }
+    if (!picked.size) {
+      r.rows.forEach((row) => {
+        if (row.status === "different") picked.set(row.source_id, new Set(row.diffs.filter((d) => !d.env_specific && !d.only_in_target).map((d) => d.attr)));
+      });
+    }
+    const visible = r.rows.filter((row) => filter === "all" || (filter === "changes" ? ["new", "different"].includes(row.status) : row.status === filter));
+    const chip = (k, l, n) => h("button", { class: "chip" + (filter === k ? " active" : ""), onclick: () => { filter = k; draw(r); } }, `${l} (${n})`);
+    const chosen = [...picked.entries()].filter(([id, attrs]) => {
+      const row = r.rows.find((x) => x.source_id === id);
+      return row && (row.status === "new" || attrs.size);
+    });
+    const nameIn = h("input", { placeholder: `Copy ${typeLabel} from ${r.source.name} to ${r.target.name}`, maxlength: "200", style: "max-width:420px" });
+    const create = h("button", { class: "primary", disabled: !chosen.length, onclick: () => guarded(async () => {
+      create.disabled = true;
+      try {
+        const res = await api("POST", `/api/compare/${compareId}/create-job`, { name: nameIn.value, selections: chosen.map(([id, attrs]) => ({ source_id: id, attributes: [...attrs] })) });
+        location.hash = `#/jobs/${res.id}`;
+      } finally { create.disabled = false; }
+    }) }, `Create copy job (${chosen.length})`);
+
+    const rowsEl = visible.map((row) => {
+      const selectable = ["new", "different"].includes(row.status);
+      const objBox = h("input", { type: "checkbox", disabled: !selectable, checked: picked.has(row.source_id) && (row.status === "new" || picked.get(row.source_id).size > 0),
+        onchange: (e) => {
+          if (!e.target.checked) picked.set(row.source_id, new Set());
+          else picked.set(row.source_id, new Set(row.status === "new" ? [] : row.diffs.filter((d) => !d.env_specific && !d.only_in_target).map((d) => d.attr)));
+          if (row.status === "new" && !e.target.checked) picked.delete(row.source_id);
+          draw(r);
+        } });
+      let detail = null;
+      if (row.status === "different") {
+        const attrs = picked.get(row.source_id) || new Set();
+        detail = h("table", { class: "diff" },
+          h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Attribute"), h("th", {}, `In ${r.source.name}`), h("th", {}, `In ${r.target.name}`))),
+          h("tbody", {}, row.diffs.map((d) => h("tr", {},
+            h("td", {}, h("input", { type: "checkbox", checked: attrs.has(d.attr), onchange: (e) => {
+              const set = picked.get(row.source_id) || new Set();
+              e.target.checked ? set.add(d.attr) : set.delete(d.attr);
+              picked.set(row.source_id, set); draw(r);
+            } })),
+            h("td", {}, h("span", { class: "mono" }, d.label), d.env_specific ? h("span", { class: "badge b-warn", title: "Usually differs per environment; kept unless you tick it" }, "environment-specific") : null,
+              d.only_in_target ? h("span", { class: "badge", title: "Not set in the source; copying removes it from the target" }, "only in target") : null),
+            h("td", { class: "val" }, showValue(d.source)), h("td", { class: "val" }, showValue(d.target))))));
+      } else if (row.status === "new") {
+        const kept = row.diffs.filter((d) => d.env_specific).map((d) => d.label);
+        detail = h("div", { class: "small muted" }, `Not in ${r.target.name} — will be created with all copyable attributes.`,
+          kept.length ? ` Not copied (environment-specific): ${kept.join(", ")}. Set target values in the job's overrides column if needed.` : "");
+      } else if (row.status === "ambiguous") {
+        detail = h("div", { class: "small", style: "color:var(--err)" }, row.problem);
+      }
+      return h("tr", { class: row.status === "same" ? "excluded" : "" },
+        h("td", {}, objBox),
+        h("td", {}, h("strong", {}, row.name), h("div", {}, badge(row.status, { new: "b-info", different: "b-warn", same: "", ambiguous: "b-err" }[row.status])),
+          row.secrets && row.secrets.length ? h("div", { class: "small muted" }, `Secrets not copied: ${row.secrets.join(", ")}`) : null),
+        h("td", {}, detail));
+    });
+    showView(header,
+      h("div", { class: "panel" },
+        h("div", { class: "chips" }, chip("changes", "To copy", counts.new + counts.different), chip("new", "New", counts.new), chip("different", "Different", counts.different),
+          chip("same", "Same", counts.same), counts.ambiguous ? chip("ambiguous", "Ambiguous", counts.ambiguous) : null, chip("all", "All", r.rows.length)),
+        r.only_in_target.length ? h("p", { class: "small muted" }, `Only in ${r.target.name} (left alone): ${r.only_in_target.join(", ")}`) : null,
+        visible.length ? h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Object"), h("th", {}, "Attributes"))), h("tbody", {}, rowsEl))
+          : h("div", { class: "empty" }, r.rows.length ? "Nothing in this filter" : `No ${typeLabel} in ${r.source.name}`)),
+      h("div", { class: "panel sticky-actions" },
+        h("div", { class: "row" }, nameIn, create,
+          h("span", { class: "small muted" }, `Creates a job on ${r.target.name}, planned read-only. Review every before → after, then approve.`))));
+  };
+  const load = async () => { const r = await api("GET", `/api/compare/${compareId}`); draw(r); return r.status === "running"; };
+  if (await load()) pollTimer = setInterval(async () => { if (!(await load().catch(() => false))) { clearInterval(pollTimer); pollTimer = null; } }, 1000);
 }
 
 // ------------------------------------------------------------------ boot

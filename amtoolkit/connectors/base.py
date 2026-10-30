@@ -138,6 +138,16 @@ class Connector:
     def create_role(self, payload: dict) -> dict:
         raise NotImplementedError
 
+    def create_source(self, payload: dict) -> dict:
+        raise NotImplementedError
+
+    def delete_source(self, source_id: str) -> None:
+        raise NotImplementedError
+
+    def find_clusters(self, ref: str) -> list:
+        """Virtual appliance clusters by ID or exact name: [{id, name}]."""
+        raise NotImplementedError
+
     def delete_role(self, role_id: str) -> None:
         raise NotImplementedError
 

@@ -9,7 +9,7 @@ import time
 
 from .actions import ItemFailed, PlanContext, get_action, msg, references
 from .connectors import AuthError, ConfigError, ConnectorError, Interrupted
-from .store import EDITABLE_ITEM_STATUSES, Store
+from .store import EDITABLE_ITEM_STATUSES, NotFound, Store
 from .util import now_iso
 
 log = logging.getLogger(__name__)
@@ -19,6 +19,22 @@ MAX_CONSECUTIVE_FAILURES = 5
 
 class JobStateError(Exception):
     """The requested operation is not allowed in the job's current state."""
+
+
+def plan_context(connections, job, action, abort_event=None):
+    """The planning context of a job: its connection, plus the connection it copies from for actions that
+    read from a second environment."""
+    source = None
+    if action.source_connection:
+        source_id = (job["options"] or {}).get("source_connection_id")
+        try:
+            if not source_id:
+                raise NotFound("not set")
+            connections.store.get_connection(source_id)
+        except NotFound:
+            raise ConfigError("The connection to copy from is not set or was deleted; create the job again") from None
+        source = connections.build(source_id, abort_event=abort_event)
+    return PlanContext(connections.build(job["connection_id"], abort_event=abort_event), source)
 
 
 def plan_item(store: Store, action, ctx: PlanContext, item, options):
@@ -109,13 +125,16 @@ class Runner(threading.Thread):
     def _plan(self):
         job = self.store.get_job(self.job_id)
         action = get_action(job["action"])
-        ctx = PlanContext(self.engine.connections.build(job["connection_id"], abort_event=self.abort))
-        items = [i for i in self.store.all_items(self.job_id)
+        everything = self.store.all_items(self.job_id)
+        items = [i for i in everything
                  if i["status"] in EDITABLE_ITEM_STATUSES and (not self.only_unplanned or i["op"] is None)]
         self.store.add_event(self.job_id, "info", "plan_started", f"Planning {len(items)} row(s) (read-only lookups)")
         error = None
         done = 0
         try:
+            ctx = plan_context(self.engine.connections, job, action, self.abort)
+            if self.only_unplanned:
+                action.seed_context(ctx, everything)
             started = time.monotonic()
             found = prefetch_references(action, ctx, items)
             log.info("Job %s: prefetched %d reference(s) for %d row(s) in %.1f s", self.job_id, found, len(items),
@@ -259,6 +278,13 @@ class Engine:
                                          approved_hash=None, approved_at=None, error=None):
             raise JobStateError("The plan can only be refreshed before or between runs")
         return self._launch(job_id, "plan", only_unplanned=only_unplanned)
+
+    def wait(self, job_id, timeout=120):
+        """Blocks until the job's current planning or run finishes (or the timeout passes)."""
+        with self._lock:
+            runner = self._runners.get(job_id)
+        if runner is not None:
+            runner.join(timeout)
 
     def start(self, job_id):
         if not self.store.is_approved(job_id):

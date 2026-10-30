@@ -58,6 +58,10 @@ def _ids(refs):
     return sorted(r["id"] for r in refs or [] if r and r.get("id"))
 
 
+def _names(refs):
+    return {r["id"]: r.get("name") or r["id"] for r in refs or [] if r and r.get("id")}
+
+
 def normalize(type_, obj):
     owner = obj.get("owner") or {}
     source = obj.get("source") or {}
@@ -68,10 +72,21 @@ def normalize(type_, obj):
         out.update(description=obj.get("description") or "", requestable=bool(obj.get("requestable")),
                    enabled=bool(obj.get("enabled")), approval_schemes=scheme_tokens(cfg.get("approvalSchemes")),
                    entitlements=_ids(obj.get("entitlements")), source_id=source.get("id"),
-                   source_name=source.get("name"))
+                   source_name=source.get("name"), comments_required=bool(cfg.get("commentsRequired")),
+                   denial_comments_required=bool(cfg.get("denialCommentsRequired")),
+                   entitlement_names=_names(obj.get("entitlements")))
     elif type_ == "role":
         out.update(description=obj.get("description") or "", requestable=bool(obj.get("requestable")),
-                   enabled=bool(obj.get("enabled")), access_profiles=_ids(obj.get("accessProfiles")))
+                   enabled=bool(obj.get("enabled")), access_profiles=_ids(obj.get("accessProfiles")),
+                   access_profile_names=_names(obj.get("accessProfiles")))
+    elif type_ == "source":
+        cluster = obj.get("cluster") or {}
+        group = obj.get("managementWorkgroup") or {}
+        out.update(description=obj.get("description") or "", connector=obj.get("connector"),
+                   cluster=cluster.get("id"), cluster_name=cluster.get("name"),
+                   delete_threshold=obj.get("deleteThreshold"), authoritative=bool(obj.get("authoritative")),
+                   management_workgroup=group.get("id"), management_workgroup_name=group.get("name"),
+                   config=dict(obj.get("connectorAttributes") or {}))
     elif type_ == "entitlement":
         out.update(description=obj.get("description") or "", privileged=bool(obj.get("privileged")),
                    requestable=bool(obj.get("requestable")), value=obj.get("value"),
@@ -86,14 +101,36 @@ def normalize(type_, obj):
 
 PATHS = {"description": "/description", "owner": "/owner", "requestable": "/requestable", "enabled": "/enabled",
          "privileged": "/privileged", "approval_schemes": "/accessRequestConfig/approvalSchemes",
-         "entitlements": "/entitlements", "access_profiles": "/accessProfiles"}
+         "entitlements": "/entitlements", "access_profiles": "/accessProfiles",
+         "comments_required": "/accessRequestConfig/commentsRequired",
+         "denial_comments_required": "/accessRequestConfig/denialCommentsRequired",
+         "delete_threshold": "/deleteThreshold", "authoritative": "/authoritative", "cluster": "/cluster",
+         "management_workgroup": "/managementWorkgroup"}
+# Fields inside a parent object that may not exist yet: "add" creates them, "replace" would fail.
+ADD_PATHS = ("approval_schemes", "comments_required", "denial_comments_required")
+CONFIG_PREFIX = "config."  # a source's connector attribute, e.g. "config.host"
+
+
+def _pointer(key):
+    return key.replace("~", "~0").replace("/", "~1")
 
 
 def to_patch(changes):
     """JSON Patch (RFC 6902) operations for normalized field changes."""
     ops = []
     for field, value in changes.items():
-        if field == "owner":
+        if field.startswith(CONFIG_PREFIX):
+            path = "/connectorAttributes/" + _pointer(field[len(CONFIG_PREFIX):])
+            ops.append({"op": "remove", "path": path} if value is None else {"op": "add", "path": path, "value": value})
+            continue
+        if field in ("cluster", "management_workgroup") and not value:
+            ops.append({"op": "remove", "path": PATHS[field]})
+            continue
+        if field == "cluster":
+            value = {"type": "CLUSTER", "id": value}
+        elif field == "management_workgroup":
+            value = {"type": "GOVERNANCE_GROUP", "id": value}
+        elif field == "owner":
             value = {"type": "IDENTITY", "id": value}
         elif field == "approval_schemes":
             value = scheme_objects(value)
@@ -104,20 +141,23 @@ def to_patch(changes):
         elif field == "description" and value == "":
             value = None
         # "add" replaces an existing member and also works when the parent object has no value yet.
-        ops.append({"op": "add" if field == "approval_schemes" else "replace", "path": PATHS[field], "value": value})
+        ops.append({"op": "add" if field in ADD_PATHS else "replace", "path": PATHS[field], "value": value})
     return ops
 
 
 def apply_patch(obj, ops):
-    """Minimal JSON Patch for the sandbox: add/replace on object paths."""
+    """Minimal JSON Patch for the sandbox: add/replace/remove on object paths."""
     for op in ops:
-        parts = op["path"].strip("/").split("/")
+        parts = [p.replace("~1", "/").replace("~0", "~") for p in op["path"].strip("/").split("/")]
         target = obj
         for part in parts[:-1]:
             if not isinstance(target.get(part), dict):
                 target[part] = {}
             target = target[part]
-        target[parts[-1]] = op["value"]
+        if op["op"] == "remove":
+            target.pop(parts[-1], None)
+        else:
+            target[parts[-1]] = op["value"]
     return obj
 
 

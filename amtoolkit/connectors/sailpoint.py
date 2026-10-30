@@ -5,7 +5,8 @@ actions need, e.g. `idn:access-profile:manage`, `idn:sources:read`, `idn:entitle
 `idn:identity:read`, and `idn:workgroup:read` / `idn:workgroup:write` for governance groups.
 The experimental features additionally use roles, entitlement updates, sources, access requests and
 approvals (e.g. `idn:role-unchecked:manage`, `idn:entitlement:update`, `idn:sources:manage`,
-`idn:access-request:manage`, `idn:access-request-administration:write`).
+`idn:access-request:manage`, `idn:access-request-administration:write`). Copying sources between
+environments also uses `idn:managed-cluster:read`.
 """
 import re
 
@@ -81,7 +82,7 @@ class SailPointISC(Connector):
             filters = f"email eq {q(value)}"
         else:
             filters = f"alias eq {q(value)}"
-        return [{"id": i["id"], "name": i.get("name"), "email": i.get("email")}
+        return [{"id": i["id"], "name": i.get("name"), "email": i.get("email"), "alias": i.get("alias")}
                 for i in self._list("/v3/public-identities", filters)]
 
     def search_identities(self, query, limit=20):
@@ -178,7 +179,8 @@ class SailPointISC(Connector):
     def find_many(self, kind, values, scope=None):
         values = [v.strip() for v in values if v and v.strip()]
         if kind == "identity":
-            shape = lambda i: {"id": i["id"], "name": i.get("name"), "email": i.get("email")}  # noqa: E731
+            shape = lambda i: {"id": i["id"], "name": i.get("name"), "email": i.get("email"),  # noqa: E731
+                               "alias": i.get("alias")}
             path = "/v3/public-identities"
             ids = [v for v in values if ID_RE.match(v)]
             emails = [v for v in values if "@" in v and not ID_RE.match(v)]
@@ -341,6 +343,26 @@ class SailPointISC(Connector):
 
     def create_role(self, payload):
         return self.api.request("POST", "/v3/roles", json=payload)
+
+    def create_source(self, payload):
+        return self.api.request("POST", "/v3/sources", json=payload)
+
+    def delete_source(self, source_id):
+        self.api.request("DELETE", f"/v3/sources/{source_id}")
+
+    def find_clusters(self, ref):
+        ref = ref.strip()
+        if ID_RE.match(ref):
+            try:
+                c = self.api.request("GET", f"/v3/managed-clusters/{ref}")
+            except ConnectorError as exc:
+                if exc.status not in (400, 404):
+                    raise
+            else:
+                if c:
+                    return [{"id": c["id"], "name": c.get("name")}]
+        return [{"id": c["id"], "name": c.get("name")}
+                for c in self._list("/v3/managed-clusters", f"name eq {q(ref)}")]
 
     def delete_role(self, role_id):
         self.api.request("DELETE", f"/v3/roles/{role_id}")

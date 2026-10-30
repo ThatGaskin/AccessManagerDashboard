@@ -111,6 +111,13 @@ class Confirmer:
             verb = {"start": "start making these changes", "resume": "resume making these changes",
                     "approve": "approve this plan"}[command]
             lines.append(f"Target: {target}")
+            if action and action.source_connection:
+                try:
+                    source = self.store.get_connection(job["options"].get("source_connection_id"))
+                    lines.append(f"Copying from: {source['name']} ({source['environment']}) — the plan already holds "
+                                 "the values; nothing more is read from it")
+                except Exception:
+                    warnings.append("The connection this job copies from no longer exists")
             lines.append(f"Action: {action.title if action else job['action']}")
             lines += [f"{n} × {op}" for op, n in sorted(pending.items())] or ["No rows left to run"]
             if s["succeeded"] or s["skipped"] or s["failed"]:
@@ -216,6 +223,38 @@ class Confirmer:
     def _sample(self, job_id, limit=10):
         _, items = self.store.list_items(job_id, "all", limit=500)
         return [i for i in items if i["included"] and i["op"] not in ("skip", None, "error")][:limit]
+
+    # ---------------------------------------------------------------- copy page
+    @staticmethod
+    def _copy_state(op, payload):
+        return fingerprint({"op": op, "payload": payload})
+
+    def copy_summary(self, req, plan):
+        """Confirmation of a move from the Copy page, bound to the request and exactly the planned change."""
+        target = self.store.get_connection(req["connection_id"])
+        source = self.store.get_connection(req["source_connection_id"])
+        production = target["environment"] == "production"
+        verb = {"create": "Create", "update": "Update"}[plan.op]
+        lines = [f"{verb} {plan.target} in {target['name']} ({target['environment']})",
+                 f"Values from: {source['name']} ({source['environment']})"]
+        lines += [m["text"] for m in plan.messages if m.get("code") in ("change", "copy_create", "copy_pending")]
+        lines.append("It is recorded as a job, so you can undo it from the job page with Create rollback.")
+        warnings = [m["text"] for m in plan.messages if m["level"] == "warning"]
+        warnings.append("This is an EXPERIMENTAL action, tested only against the offline sandbox")
+        if production:
+            warnings.append(f"PRODUCTION connection: {target['name']}")
+        return {"command": "move", "title": f"Move values to {target['name']}", "lines": lines, "warnings": warnings,
+                "danger": False, "checkbox": "I have reviewed this summary and want to make these changes now.",
+                "requires_text": target["name"] if production else None,
+                "token": self._token("copy", fingerprint(req), "move", self._copy_state(plan.op, plan.payload)),
+                "expires_in": TOKEN_TTL}
+
+    def verify_copy(self, req, item, confirmation):
+        """The move's job was planned again just now; it must plan exactly what the user confirmed."""
+        target = self.store.get_connection(req["connection_id"])
+        requires_text = target["name"] if target["environment"] == "production" else None
+        self._check("copy", fingerprint(req), "move", self._copy_state(item["op"], item["payload"]), confirmation,
+                    requires_text)
 
     # ---------------------------------------------------------------- connections
     def _connection_state(self, conn_id):
