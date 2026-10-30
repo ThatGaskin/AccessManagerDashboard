@@ -63,6 +63,10 @@ class Connector:
     def find_identities(self, ref: str) -> list:
         raise NotImplementedError
 
+    def search_identities(self, query: str, limit: int = 20) -> list:
+        """Identities whose name, username (alias) or email starts with / matches `query`, for pickers."""
+        raise NotImplementedError
+
     def find_sources(self, name: str) -> list:
         raise NotImplementedError
 

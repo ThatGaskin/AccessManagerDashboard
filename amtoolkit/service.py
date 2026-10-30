@@ -328,6 +328,32 @@ class Toolkit:
         rows = [definition.followup_row(r) for r in rep["rows"]]
         return action, csvio.write(cols, [[r.get(c, "") for c in cols] for r in rows])
 
+    def create_job_from_report(self, report_id, defaults=None):
+        """Turns a report's findings into a job for the action that fixes them. `defaults` fill blank cells
+        for every row (e.g. one new owner). The job is planned read-only and opens in review as usual."""
+        rep = self.reports.get(report_id)
+        definition = REPORTS.get(rep["report"])
+        if not definition or not definition.followup_action:
+            raise ValueError("This report has no follow-up action")
+        if rep["status"] != "completed" or not rep["rows"]:
+            raise JobStateError("The report has no findings to turn into a job")
+        action = get_action(definition.followup_action)
+        allowed = {p.name for p in definition.fill}
+        defaults = {k: str(v).strip() for k, v in (defaults or {}).items() if k in allowed and str(v or "").strip()}
+        rows = []
+        for n, finding in enumerate(rep["rows"], start=1):
+            row = definition.followup_row(finding)
+            row.update({k: v for k, v in defaults.items() if not row.get(k)})
+            rows.append((n, action.normalize(row)))
+        job_id = self.create_job(name=f"{action.title} — from report: {definition.title}", action_key=action.key,
+                                 connection_id=rep["connection_id"], options={}, filename=f"report {report_id}",
+                                 data=None, rows=rows)
+        self.store.add_event(job_id, "info", "from_report",
+                             f"Created from report '{definition.title}' ({len(rows)} finding(s))"
+                             + (f"; filled for all rows: {', '.join(defaults)}" if defaults else ""),
+                             data={"report_id": report_id, "defaults": defaults})
+        return job_id
+
     def delete_job(self, job_id):
         job = self.store.get_job(job_id)
         if job["status"] in ("planning", "running", "pausing") or self.engine.is_active(job_id):

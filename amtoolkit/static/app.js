@@ -668,6 +668,69 @@ function experimentalBanner() {
 }
 
 // ------------------------------------------------------------------ reports
+function plainInput(placeholder) {
+  const el = h("input", { placeholder: placeholder || "" });
+  return { el, get value() { return el.value.trim(); } };
+}
+
+// Search-and-select for identities: type 2+ characters of a name, username or email, pick a person.
+// The selected identity's ID is used, so the result never depends on ambiguous free text.
+function identityPicker(connectionId, placeholder) {
+  let selected = null;
+  let timer = null;
+  let seq = 0;
+  const input = h("input", { placeholder: placeholder || "Search by name, username or email", autocomplete: "off",
+    role: "combobox", "aria-autocomplete": "list", "aria-expanded": "false" });
+  const list = h("ul", { class: "picker-list", role: "listbox" });
+  const chip = h("div", { class: "picker-chip" });
+  list.hidden = true;
+  chip.hidden = true;
+  const describe = (i) => [i.email, i.alias].filter(Boolean).join(" · ");
+  const showList = (items) => { list.replaceChildren(...items); list.hidden = false; input.setAttribute("aria-expanded", "true"); };
+  const hideList = () => { list.hidden = true; input.setAttribute("aria-expanded", "false"); };
+  const choose = (i) => {
+    selected = i;
+    hideList();
+    input.hidden = true;
+    chip.hidden = false;
+    chip.replaceChildren(h("div", {}, h("strong", {}, i.name || i.id), " ", h("span", { class: "small muted" }, describe(i)),
+      h("div", { class: "mono small muted" }, i.id)),
+      h("button", { type: "button", class: "link", onclick: () => {
+        selected = null; chip.hidden = true; input.hidden = false; input.value = ""; input.focus();
+      } }, "Change"));
+  };
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (q.length < 2) { hideList(); return; }
+    timer = setTimeout(async () => {
+      const mine = ++seq;
+      showList([h("li", { class: "muted" }, "Searching…")]);
+      let rows;
+      try {
+        rows = await api("GET", `/api/connections/${connectionId()}/identities?q=${encodeURIComponent(q)}`);
+      } catch (e) {
+        if (mine === seq) showList([h("li", { class: "muted" }, `Search failed: ${e.message}`)]);
+        return;
+      }
+      if (mine !== seq) return; // a newer search is running
+      showList(rows.length ? rows.map((i) => h("li", { role: "option", tabindex: "0", onclick: () => choose(i),
+        onkeydown: (e) => {
+          if (e.key === "Enter") { e.preventDefault(); choose(i); }
+          if (e.key === "ArrowDown" && e.target.nextSibling) e.target.nextSibling.focus();
+          if (e.key === "ArrowUp") (e.target.previousSibling || input).focus();
+          if (e.key === "Escape") { hideList(); input.focus(); }
+        } }, h("strong", {}, i.name || i.id), " ", h("span", { class: "small muted" }, describe(i))))
+        : [h("li", { class: "muted" }, "No matching identities")]);
+    }, 250);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" && !list.hidden && list.firstChild && list.firstChild.tabIndex === 0) { e.preventDefault(); list.firstChild.focus(); }
+    if (e.key === "Escape") hideList();
+  });
+  return { el: h("div", { class: "picker" }, input, list, chip), get value() { return selected ? selected.id : ""; } };
+}
+
 async function renderReports() {
   const [conns, recent] = await Promise.all([api("GET", "/api/connections"), api("GET", "/api/reports")]);
   if (!conns.length) {
@@ -682,11 +745,18 @@ async function renderReports() {
     const r = META.reports.find((x) => x.key === repSel.value);
     const followup = r.followup_action && META.actions.find((a) => a.key === r.followup_action);
     Object.keys(inputs).forEach((k) => delete inputs[k]);
-    details.replaceChildren(h("p", { class: "muted" }, r.description),
+    const fields = r.params.map((p) => {
+      const field = p.kind === "identity" ? identityPicker(() => connSel.value, p.help) : plainInput(p.help);
+      inputs[p.name] = field;
+      return h("div", { class: "field" }, h("span", { class: "field-label" }, p.label, p.required ? " *" : ""), field.el);
+    });
+    // h() flattens nested arrays; replaceChildren() would not, so build the content with h().
+    details.replaceChildren(h("div", {}, h("p", { class: "muted" }, r.description),
       followup ? h("p", { class: "small muted" }, "Findings can be exported as a CSV for ", h("strong", {}, followup.title), ".") : null,
-      r.params.map((p) => { inputs[p.name] = h("input", { placeholder: p.help || "" }); return h("label", { class: "field" }, h("span", {}, p.label, p.required ? " *" : ""), inputs[p.name]); }));
+      fields));
   };
   repSel.addEventListener("change", refresh);
+  connSel.addEventListener("change", refresh); // a picked identity belongs to the previous connection
   const runBtn = h("button", { class: "primary", onclick: () => guarded(async () => {
     runBtn.disabled = true;
     const params = Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value]));
@@ -695,7 +765,7 @@ async function renderReports() {
   }) }, "Run report");
   view.replaceChildren(
     h("div", { class: "row" }, h("h1", {}, "Reports"), experimentalBadge()),
-    h("div", { class: "banner info" }, "Reports are read-only: they only list findings. To fix something, export the findings as a CSV for the matching bulk action, fill in the blanks, and upload it as a new job — it is planned, reviewed and approved like any other job."),
+    h("div", { class: "banner info" }, "Reports are read-only: they only list findings. To fix them, use “Create job from findings” on the report — it creates a job for the matching bulk action that is planned, reviewed and approved like any other job. You can also download the findings as a CSV and edit them in a spreadsheet first."),
     experimentalBanner(),
     h("div", { class: "grid2" },
       h("div", { class: "panel" }, h("label", { class: "field" }, h("span", {}, "Connection"), connSel), h("label", { class: "field" }, h("span", {}, "Report"), repSel), details, runBtn),
@@ -705,6 +775,31 @@ async function renderReports() {
         h("td", { class: "small" }, r.status === "completed" ? `${r.count} finding(s)` : ""),
         h("td", { class: "small muted" }, fmtTime(r.created_at)))))) : h("p", { class: "muted" }, "None yet."))));
   refresh();
+}
+
+function jobFromReportDialog(report, def, followup) {
+  const fields = def.fill.map((p) => ({ p, field: p.kind === "identity" ? identityPicker(() => report.connection_id, "Search by name, username or email") : plainInput(p.help) }));
+  const check = h("input", { type: "checkbox", id: "report-job-check" });
+  const create = h("button", { class: "primary", disabled: true, onclick: () => guarded(async () => {
+    create.disabled = true;
+    const defaults = Object.fromEntries(fields.map(({ p, field }) => [p.name, field.value]));
+    const res = await api("POST", `/api/reports/${report.id}/create-job`, { defaults }).finally(() => { create.disabled = !check.checked; });
+    closeModal();
+    toast("Job created — it is being planned (read-only). Review it, then approve and start.");
+    location.hash = `#/jobs/${res.id}`;
+  }) }, "Create job");
+  check.addEventListener("change", () => { create.disabled = !check.checked; });
+  openModal(h("h2", {}, `Create a “${followup.title}” job`),
+    followup.experimental ? experimentalBanner() : null,
+    h("ul", { class: "summary" },
+      h("li", {}, `${report.count} row(s), one per finding of “${report.title}”`),
+      h("li", {}, "Same connection the report ran on"),
+      h("li", {}, "Nothing changes now: the job is planned with read-only lookups and opens in review, where you can edit or exclude rows before approving and starting it.")),
+    fields.length ? h("div", {}, h("h3", {}, "Fill in for all rows (optional)"),
+      fields.map(({ p, field }) => h("div", { class: "field" }, h("span", { class: "field-label" }, p.label, h("div", { class: "help small muted" }, p.help)), field.el)),
+      h("p", { class: "small muted" }, "Anything left empty can be filled in per row during review; rows still missing a value show as errors you can fix or exclude.")) : null,
+    h("label", { class: "confirm-check", for: "report-job-check" }, check, h("span", {}, "I have reviewed this summary and want to create the job.")),
+    h("div", { class: "modal-actions" }, h("button", { onclick: closeModal }, "Back"), create));
 }
 
 async function renderReport(reportId) {
@@ -721,15 +816,15 @@ async function renderReport(reportId) {
       h("div", { class: "row", style: "margin-bottom:12px" },
         running ? h("button", { onclick: () => guarded(async () => { await api("POST", `/api/reports/${reportId}/cancel`); load(); }) }, "Cancel") : null,
         r.status === "completed" ? h("button", { onclick: () => download(`/api/reports/${reportId}/export.csv`) }, "Export findings CSV") : null,
-        r.status === "completed" && followup && r.count ? h("button", { class: "primary", onclick: () => download(`/api/reports/${reportId}/followup.csv`) }, `Download as “${followup.title}” CSV`) : null,
-        r.status === "completed" && followup && r.count ? h("a", { class: "btn", href: `#/new?action=${followup.key}` }, `Upload it as a new job →`) : null,
+        r.status === "completed" && followup && r.count ? h("button", { onclick: () => download(`/api/reports/${reportId}/followup.csv`) }, `Download as “${followup.title}” CSV`) : null,
+        r.status === "completed" && followup && r.count ? h("button", { class: "primary", onclick: () => jobFromReportDialog(r, def, followup) }, "Create job from findings…") : null,
         h("button", { class: "danger", onclick: () => guarded(async () => {
           const ok = await confirmationDialog({ title: "Delete the report", lines: [`The results of '${r.title}' (${r.count} finding(s)) are removed from this computer`, "Nothing changes in the target system"],
             warnings: [], danger: true, checkbox: "I have reviewed this summary and want to delete this report.", requires_text: null, token: null, expires_in: 600 });
           if (!ok) return;
           await api("DELETE", `/api/reports/${reportId}`); location.hash = "#/reports";
         }) }, "Delete…")),
-      r.status === "completed" && followup && r.count ? h("p", { class: "small muted" }, `The download contains one row per finding with the columns of “${followup.title}”. Fill in the blank values (rows you leave empty will show as errors you can exclude), then upload it.`) : null,
+      r.status === "completed" && followup && r.count ? h("p", { class: "small muted" }, `“Create job from findings” turns these ${r.count} finding(s) into a “${followup.title}” job on the same connection. Prefer a spreadsheet? Download the CSV, edit it, and upload it on `, h("a", { href: `#/new?action=${followup.key}` }, "New job"), ".") : null,
       r.status === "completed" ? h("div", { class: "panel" }, r.rows.length ? h("table", {},
         h("thead", {}, h("tr", {}, def.columns.map((c) => h("th", {}, c)))),
         h("tbody", {}, r.rows.map((row) => h("tr", {}, def.columns.map((c) => h("td", { class: c === "id" ? "mono" : "" }, row[c] ?? "")))))) : h("div", { class: "empty" }, "No findings 🎉"),

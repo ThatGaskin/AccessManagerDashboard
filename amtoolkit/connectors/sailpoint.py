@@ -81,6 +81,25 @@ class SailPointISC(Connector):
         return [{"id": i["id"], "name": i.get("name"), "email": i.get("email")}
                 for i in self._list("/v3/public-identities", filters)]
 
+    def search_identities(self, query, limit=20):
+        query = query.strip()
+        if ID_RE.match(query) or "@" in query:
+            return self.find_identities(query)
+        # Run simple filters one by one rather than one OR-filter, so a tenant that rejects one of them
+        # (unsupported operator) still returns results from the others.
+        found = {}
+        for filters in (f"alias sw {q(query)}", f"firstname sw {q(query)}", f"lastname sw {q(query)}"):
+            try:
+                rows = self._list("/v3/public-identities", filters, limit=limit)
+            except ConnectorError as exc:
+                if exc.status == 400:
+                    continue
+                raise
+            for i in rows:
+                found.setdefault(i["id"], {"id": i["id"], "name": i.get("name"), "email": i.get("email"),
+                                           "alias": i.get("alias")})
+        return sorted(found.values(), key=lambda i: (i["name"] or "").lower())[:limit]
+
     def find_sources(self, name):
         return [{"id": s["id"], "name": s["name"]} for s in self._list("/v3/sources", f"name eq {q(name)}")]
 

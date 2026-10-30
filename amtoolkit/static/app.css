@@ -97,3 +97,10 @@ ul.summary { margin: 8px 0 14px; padding-left: 20px; }
 ul.summary li { margin-bottom: 4px; }
 label.confirm-check { display: flex; gap: 10px; align-items: flex-start; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); cursor: pointer; font-weight: 600; }
 label.confirm-check input { margin-top: 3px; width: 18px; height: 18px; }
+div.field { margin-bottom: 10px; }
+.field-label { display: block; font-weight: 600; margin-bottom: 3px; }
+.picker { position: relative; }
+.picker-list { position: absolute; z-index: 10; left: 0; right: 0; margin: 2px 0 0; padding: 4px 0; list-style: none; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 6px 16px rgba(0,0,0,.15); max-height: 260px; overflow: auto; }
+.picker-list li { padding: 6px 10px; cursor: pointer; }
+.picker-list li[role=option]:hover, .picker-list li[role=option]:focus { background: var(--neutral-bg); outline: none; }
+.picker-chip { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; padding: 8px 10px; border: 1px solid var(--accent); border-radius: 6px; background: var(--bg); }

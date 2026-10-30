@@ -22,6 +22,7 @@ class Param:
     label: str
     required: bool = False
     help: str = ""
+    kind: str = "text"  # "identity" renders a search-and-select picker
 
 
 @dataclass
@@ -34,11 +35,14 @@ class Report:
     params: list = field(default_factory=list)
     followup_action: str = None
     followup_row: callable = None
+    # Columns of the follow-up action the user fills in for all rows when creating the job from findings.
+    fill: list = field(default_factory=list)
     experimental: bool = True
 
     def to_dict(self):
         return {"key": self.key, "title": self.title, "description": self.description, "columns": self.columns,
                 "params": [p.__dict__ for p in self.params], "followup_action": self.followup_action,
+                "fill": [p.__dict__ for p in self.fill],
                 "experimental": self.experimental}
 
 
@@ -107,36 +111,45 @@ REPORTS = {r.key: r for r in (
            "Requesters cannot tell what these grant. Export to 'Update access profiles' and fill in descriptions.",
            BASE + ["source"], scan_ap_missing_description,
            followup_action="access_profile.update",
-           followup_row=lambda r: {"access_profile": r["id"], "description": ""}),
+           followup_row=lambda r: {"access_profile": r["id"], "description": ""},
+           fill=[Param("description", "Description for all rows", help="Optional — or write one per row in review")]),
     Report("ap_no_approval", "Requestable access profiles without approvers",
            "Requests for these are granted automatically. Export to 'Update access profiles' to add approvers.",
            BASE + ["source"], scan_ap_no_approval,
            followup_action="access_profile.update",
-           followup_row=lambda r: {"access_profile": r["id"], "approval_schemes": "manager"}),
+           followup_row=lambda r: {"access_profile": r["id"], "approval_schemes": ""},
+           fill=[Param("approval_schemes", "Approvers for all rows", help="e.g. manager or manager;governance_group:Finance Approvers")]),
     Report("owned_by", "Objects owned by an identity",
            "Everything a person owns — e.g. before they leave. Export to 'Reassign ownership' and fill in new owners.",
            BASE + ["source"], scan_owned_by,
-           params=[Param("identity", "Identity (email, username or ID)", True)],
+           params=[Param("identity", "Identity", True, "Search by name, username or email", kind="identity")],
            followup_action="ownership.reassign",
            followup_row=lambda r: {"object_type": r["type"], "object": r["id"], "current_owner": r["owner_id"],
-                                   "new_owner": ""}),
+                                   "new_owner": ""},
+           fill=[Param("new_owner", "New owner for all rows", help="Optional — or choose per row in review",
+                       kind="identity")]),
     Report("orphaned_owners", "Objects without a valid owner",
            "Access profiles, roles, entitlements, sources and governance groups with no owner, or whose owner no "
            "longer exists. Export to 'Reassign ownership'.",
            BASE + ["source", "problem"], scan_orphaned_owners,
            followup_action="ownership.reassign",
-           followup_row=lambda r: {"object_type": r["type"], "object": r["id"], "new_owner": ""}),
+           followup_row=lambda r: {"object_type": r["type"], "object": r["id"], "new_owner": ""},
+           fill=[Param("new_owner", "New owner for all rows", help="Optional — or choose per row in review",
+                       kind="identity")]),
     Report("empty_groups", "Governance groups without members",
            "Approvals assigned to these can never be completed. Export to 'Change governance group members'.",
            BASE + ["description"], scan_empty_groups,
            followup_action="governance_group.members",
-           followup_row=lambda r: {"group": r["id"], "add": ""}),
+           followup_row=lambda r: {"group": r["id"], "add": ""},
+           fill=[Param("add", "Members to add to every group", help="Identities separated by ';' — or per group in review")]),
     Report("entitlements_missing_metadata", "Entitlements missing a description or owner",
            "A common audit finding. Export to 'Update entitlements' and fill in the blanks.",
            BASE + ["source", "privileged", "missing"], scan_entitlements_metadata,
            params=[Param("source", "Source name (optional)", False, "Limit the scan to one source")],
            followup_action="entitlement.update",
-           followup_row=lambda r: {"source": r["source"], "entitlement": r["id"], "description": "", "owner": ""}),
+           followup_row=lambda r: {"source": r["source"], "entitlement": r["id"], "description": "", "owner": ""},
+           fill=[Param("owner", "Owner for all rows", help="Optional — or choose per row in review", kind="identity"),
+                 Param("description", "Description for all rows", help="Optional — usually better written per row")]),
 )}
 
 

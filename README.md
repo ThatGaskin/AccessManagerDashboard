@@ -199,8 +199,11 @@ the rollback job that you can edit or exclude.
 time the toolkit re-reads the object and refuses to apply a row whose fields were changed by someone else
 after planning, so a stale plan never overwrites newer edits.
 
-**Reports** (read-only) scan the tenant and list findings, and can export them as a pre-filled CSV for
-the action that fixes them:
+**Reports** (read-only) scan the tenant and list findings. **Create job from findings** turns them
+straight into a job for the action that fixes them, on the same connection — optionally filling a value
+for all rows (e.g. one new owner picked with the identity search). The job is planned and opens in
+review as usual. The findings can also be downloaded as a pre-filled CSV to edit in a spreadsheet.
+Identity parameters (e.g. *Objects owned by an identity*) use a search-as-you-type picker:
 
 | Report | Follow-up action |
 |---|---|

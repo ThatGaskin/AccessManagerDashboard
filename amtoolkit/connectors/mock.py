@@ -121,6 +121,15 @@ class MockTenant(Connector):
             return [{"id": i["id"], "name": i["name"], "email": i["email"]} for i in self._state()["identities"]
                     if v in (i["id"].lower(), i["alias"].lower(), i["email"].lower())]
 
+    def search_identities(self, query, limit=20):
+        self._delay()
+        v = query.strip().lower()
+        with _lock:
+            rows = [i for i in self._state()["identities"]
+                    if v in i["name"].lower() or i["alias"].lower().startswith(v) or i["email"].lower().startswith(v)
+                    or i["id"].lower() == v]
+        return [{"id": i["id"], "name": i["name"], "email": i["email"], "alias": i["alias"]} for i in rows[:limit]]
+
     def find_sources(self, name):
         self._delay()
         with _lock:

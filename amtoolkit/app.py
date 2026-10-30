@@ -171,6 +171,13 @@ def create_app(data_dir, *, allowed_hosts=None):
             toolkit.connections.clear_secret(conn_id)
         return jsonify(toolkit.connection_view(toolkit.store.get_connection(conn_id)))
 
+    @app.get("/api/connections/<conn_id>/identities")
+    def search_identities(conn_id):
+        query = request.args.get("q", "").strip()
+        if len(query) < 2:
+            return jsonify([])
+        return jsonify(toolkit.connections.build(conn_id).search_identities(query[:100]))
+
     @app.post("/api/connections/<conn_id>/test")
     def test_connection(conn_id):
         try:
@@ -348,6 +355,12 @@ def create_app(data_dir, *, allowed_hosts=None):
     def export_report(report_id):
         return Response(toolkit.report_csv(report_id), mimetype="text/csv",
                         headers={"Content-Disposition": f'attachment; filename="{report_id}.csv"'})
+
+    @app.post("/api/reports/<report_id>/create-job")
+    def create_job_from_report(report_id):
+        defaults = body().get("defaults")
+        job_id = toolkit.create_job_from_report(report_id, defaults if isinstance(defaults, dict) else {})
+        return jsonify(id=job_id), 201
 
     @app.get("/api/reports/<report_id>/followup.csv")
     def followup_report(report_id):

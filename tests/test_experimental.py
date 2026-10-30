@@ -219,3 +219,26 @@ def test_report_api(client, toolkit, sandbox):
     assert client.get(f"/api/reports/{rid}/export.csv").status_code == 200
     assert client.get(f"/api/reports/{rid}/followup.csv").status_code == 200
     assert client.delete(f"/api/reports/{rid}").status_code == 200
+
+
+def test_job_from_report_with_defaults(toolkit, sandbox):
+    rid, rep = run_report(toolkit, sandbox, "owned_by", identity=ALICE)
+    j = toolkit.create_job_from_report(rid, {"new_owner": BOB, "ignored": "x"})
+    wait_for(lambda: toolkit.store.get_job(j)["status"] == "review")
+    rows = items(toolkit, j)
+    assert len(rows) == rep["count"] and {r["input"]["new_owner"] for r in rows} == {BOB}
+    assert {r["op"] for r in rows} == {"update"}
+    assert toolkit.store.get_job(j)["connection_id"] == sandbox["id"]
+
+
+def test_job_from_report_without_defaults_leaves_blanks_to_fill(toolkit, sandbox):
+    rid, _ = run_report(toolkit, sandbox, "orphaned_owners")
+    j = toolkit.create_job_from_report(rid, {})
+    wait_for(lambda: toolkit.store.get_job(j)["status"] == "review")
+    assert {r["op"] for r in items(toolkit, j)} == {"error"}  # new_owner still to be chosen per row
+
+
+def test_identity_search_api(client, sandbox):
+    found = client.get(f"/api/connections/{sandbox['id']}/identities?q=ali").get_json()
+    assert [i["name"] for i in found] == ["Alice Admin"]
+    assert client.get(f"/api/connections/{sandbox['id']}/identities?q=a").get_json() == []
