@@ -19,6 +19,7 @@ from .actions import ACTIONS, get_action
 from .connectors import ENVIRONMENTS, ConnectorError, kinds_metadata
 from .csvio import CsvError, template
 from .engine import JobStateError
+from .reports import REPORTS
 from .service import Toolkit
 from .store import NotFound
 
@@ -119,7 +120,8 @@ def create_app(data_dir, *, allowed_hosts=None):
     @app.get("/api/meta")
     def meta():
         return jsonify(version=__version__, operator=operator, environments=ENVIRONMENTS,
-                       actions=[a.to_dict() for a in ACTIONS.values()], connector_kinds=kinds_metadata())
+                       actions=[a.to_dict() for a in ACTIONS.values()], connector_kinds=kinds_metadata(),
+                       reports=[r.to_dict() for r in REPORTS.values()])
 
     @app.get("/api/actions/<key>/template.csv")
     def action_template(key):
@@ -275,5 +277,44 @@ def create_app(data_dir, *, allowed_hosts=None):
         job = toolkit.store.get_job(job_id)
         return Response(toolkit.export_csv(job_id), mimetype="text/csv",
                         headers={"Content-Disposition": f'attachment; filename="{job["id"]}_results.csv"'})
+
+    # ------------------------------------------------------------------ reports (experimental, read-only)
+    @app.get("/api/reports")
+    def list_reports():
+        return jsonify(toolkit.reports.list())
+
+    @app.post("/api/reports")
+    def run_report():
+        data = body()
+        report_id = toolkit.reports.start(data.get("connection_id", ""), data.get("report", ""), data.get("params"))
+        return jsonify(id=report_id), 201
+
+    @app.get("/api/reports/<report_id>")
+    def get_report(report_id):
+        rep = toolkit.reports.get(report_id)
+        rep["rows"] = rep["rows"][:1000]  # the CSV export has everything
+        return jsonify(rep)
+
+    @app.post("/api/reports/<report_id>/cancel")
+    def cancel_report(report_id):
+        toolkit.reports.get(report_id, with_rows=False)
+        toolkit.reports.cancel(report_id)
+        return jsonify(ok=True)
+
+    @app.delete("/api/reports/<report_id>")
+    def delete_report(report_id):
+        toolkit.reports.delete(report_id)
+        return jsonify(ok=True)
+
+    @app.get("/api/reports/<report_id>/export.csv")
+    def export_report(report_id):
+        return Response(toolkit.report_csv(report_id), mimetype="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="{report_id}.csv"'})
+
+    @app.get("/api/reports/<report_id>/followup.csv")
+    def followup_report(report_id):
+        action, text = toolkit.report_followup_csv(report_id)
+        name = f"{report_id}_{action.key.replace('.', '_')}.csv"
+        return Response(text, mimetype="text/csv", headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     return app

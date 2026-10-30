@@ -155,6 +155,56 @@ Members are added right after the group is created. If that step fails, the row 
 ID and **Retry failed** only adds the members to the existing group. Rollback deletes the groups the
 job created. See `examples/governance_groups_sandbox.csv`.
 
+## Experimental features
+
+These are marked **experimental** throughout the UI (action picker, job pages, approval dialog, Reports
+page). They were built from the SailPoint ISC API documentation and are tested end-to-end against the
+offline sandbox only — **try them on a sandbox or test tenant first.** They use the same safety model as
+everything else: read-only plan, approval bound to the plan, pause/resume, audit log, rollback.
+
+| Action | What it does | Rollback |
+|---|---|---|
+| Update access profiles | Change description, owner, requestable/enabled, approvers; add/remove entitlements. Blank cells = unchanged, `(clear)` empties a description, `none` removes all approvers. | Restores previous values |
+| Reassign ownership | Move ownership of access profiles, roles, entitlements, sources and governance groups. Optional `current_owner` column as a safety check. | Hands ownership back* |
+| Update entitlements | Description, owner, privileged, requestable. | Restores previous values* |
+| Change governance group members | Add/remove members; only real changes are planned. | Reverses the changes |
+| Create roles / Delete roles | Roles bundling existing access profiles. | Deletes created roles |
+| Submit access requests | Bulk grant or revoke requests (they still go through the tenant's approvals). Skips items with a pending request. | Submits the opposite request |
+| Cancel access requests | Cancel pending requests by ID. | — |
+| Forward pending approvals | Reassign pending approvals to another approver. | Forwards them back |
+
+\* A previous owner that no longer exists (or "no owner") cannot be restored; such rows show an error in
+the rollback job that you can edit or exclude.
+
+**Updates are drift-safe:** the plan records the current value of every field it will change; at run
+time the toolkit re-reads the object and refuses to apply a row whose fields were changed by someone else
+after planning, so a stale plan never overwrites newer edits.
+
+**Reports** (read-only) scan the tenant and list findings, and can export them as a pre-filled CSV for
+the action that fixes them:
+
+| Report | Follow-up action |
+|---|---|
+| Access profiles without a description | Update access profiles |
+| Requestable access profiles without approvers | Update access profiles |
+| Objects owned by an identity (e.g. a leaver) | Reassign ownership |
+| Objects without a valid owner (none, or deleted identity) | Reassign ownership |
+| Governance groups without members | Change governance group members |
+| Entitlements missing a description or owner | Update entitlements |
+
+Reports read up to 20,000 objects per type. Not covered yet: certification campaign management and
+leaver verification.
+
+API used (in addition to the stable features): `PATCH` with JSON Patch on `/v3/access-profiles`,
+`/v3/roles`, `/v3/sources`, `/{beta|v2025}/entitlements`, `/{beta|v2025}/workgroups`; `GET/POST/DELETE
+/v3/roles`; `workgroups/{id}/members` and `members/bulk-delete`; `/v3/access-requests`,
+`/v3/access-requests/cancel`, `/v3/access-request-status`; `/v3/access-request-approvals/pending` and
+`/{id}/forward`. Typical extra scopes: `idn:role-unchecked:manage`, `idn:entitlement:update`,
+`idn:sources:manage`, `idn:access-request:manage`, `idn:access-request-administration:write`.
+Things most likely to need adjusting on a real tenant: which fields each object's PATCH endpoint accepts,
+the filters accepted by `access-request-status` and `access-request-approvals/pending`, and admin
+visibility of other people's pending approvals.
+
 ## Project layout
 
 ```
@@ -167,8 +217,10 @@ amtoolkit/
   store.py, db.py          SQLite persistence (WAL), job & item state machine, audit log
   csvio.py                 CSV parsing/export
   actions/                 bulk actions (CSV schema → plan → execute → rollback):
-                           access profiles and governance groups, create + delete
-  connectors/              target systems: SailPoint ISC, offline sandbox; resilient HTTP client
+                           access profiles and governance groups; experimental.py for the rest
+  reports.py               read-only hygiene reports (experimental)
+  connectors/              target systems: SailPoint ISC, offline sandbox; resilient HTTP client;
+                           model.py normalizes objects and builds JSON Patch updates
   static/                  single-page UI (vanilla JS/CSS, no build step)
 tests/                     pytest suite (workflow, safety rules, HTTP retry logic, API security)
 packaging/build_pyz.py     builds the single-file AccessManagerToolkit.pyz

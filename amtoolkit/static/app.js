@@ -58,11 +58,16 @@ const STATUS_BADGE = {
   paused: "b-warn", completed: "b-ok", cancelled: "",
   pending: "", succeeded: "b-ok", skipped: "", failed: "b-err", excluded: "",
   create: "b-info", delete: "b-err", skip: "", error: "b-err",
+  update: "b-info", request: "b-info", cancel: "b-warn", forward: "b-info",
 };
 const badge = (text, cls) => h("span", { class: "badge " + (cls !== undefined ? cls : (STATUS_BADGE[text] || "")) }, text);
 const envBadge = (env) => badge(env, env === "production" ? "b-prod" : env === "test" ? "b-warn" : "b-ok");
 
 let modalSeq = 0; // identifies the dialog currently shown, so late async results don't reopen a closed one
+function showView(...content) {
+  view.replaceChildren(...content.flat(Infinity).filter((c) => c !== null && c !== undefined && c !== false));
+}
+
 function openModal(...content) {
   modalSeq += 1;
   modalBody.replaceChildren(...content.flat(Infinity).filter((c) => c !== null && c !== undefined && c !== false));
@@ -87,6 +92,8 @@ const routes = [
   [/^#?\/?$/, renderJobs],
   [/^#\/new(?:\?action=([\w.]+))?$/, renderNewJob],
   [/^#\/connections$/, renderConnections],
+  [/^#\/reports$/, renderReports],
+  [/^#\/reports\/([\w-]+)$/, renderReport],
   [/^#\/jobs\/([\w-]+)$/, renderJob],
 ];
 
@@ -118,7 +125,7 @@ async function renderJobs() {
         h("td", {}, h("strong", {}, j.name), j.parent_job_id ? h("div", { class: "small muted" }, "follow-up job") : null),
         h("td", {}, j.action_title),
         h("td", {}, j.connection.name, " ", envBadge(j.connection.environment)),
-        h("td", {}, badge(j.status), j.status === "paused" && !j.approved ? h("div", { class: "small muted" }, "needs approval") : null),
+        h("td", {}, badge(j.status), j.experimental ? experimentalBadge() : null, j.status === "paused" && !j.approved ? h("div", { class: "small muted" }, "needs approval") : null),
         h("td", { class: "small" }, `${c.done} / ${c.included}`, c.status.failed ? h("span", { class: "badge b-err" }, `${c.status.failed} failed`) : null),
         h("td", { class: "small muted" }, fmtTime(j.created_at)));
     })));
@@ -159,7 +166,10 @@ async function renderNewJob(presetAction) {
       " — start with a Sandbox connection to practise safely."));
     return;
   }
-  const actionSel = h("select", { name: "action" }, META.actions.map((a) => h("option", { value: a.key, selected: a.key === presetAction }, a.title)));
+  const opt = (a) => h("option", { value: a.key, selected: a.key === presetAction }, a.title);
+  const actionSel = h("select", { name: "action" },
+    h("optgroup", { label: "Tested" }, META.actions.filter((a) => !a.experimental).map(opt)),
+    h("optgroup", { label: "Experimental — not yet tested on a real tenant" }, META.actions.filter((a) => a.experimental).map(opt)));
   const connSel = h("select", { name: "connection_id" }, conns.map((c) => h("option", { value: c.id }, `${c.name} (${c.environment})`)));
   const nameIn = h("input", { name: "name", placeholder: "e.g. Finance access profiles – Q4", maxlength: "200" });
   const fileIn = h("input", { type: "file", accept: ".csv,text/csv", hidden: true });
@@ -181,7 +191,8 @@ async function renderNewJob(presetAction) {
     optsBox.replaceChildren(...action.options.map((o) => h("label", { class: "field" }, h("span", {}, o.label, h("div", { class: "help" }, o.help)),
       h("select", { name: "opt_" + o.name }, o.choices.map((c) => h("option", { value: c, selected: c === o.default }, c))))));
     docs.replaceChildren(
-      h("h2", {}, action.title), h("p", { class: "muted" }, action.description),
+      h("h2", {}, action.title, action.experimental ? experimentalBadge() : null), h("p", { class: "muted" }, action.description),
+      action.experimental ? experimentalBanner() : null,
       h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Column"), h("th", {}, "Description"), h("th", {}, "Example"))),
         h("tbody", {}, action.columns.map((c) => h("tr", {}, h("td", { class: "mono" }, c.name, c.required ? " *" : ""), h("td", { class: "small" }, c.help), h("td", { class: "mono" }, c.example))))),
       h("p", {}, h("a", { class: "btn", href: `/api/actions/${action.key}/template.csv` }, "Download CSV template")),
@@ -306,6 +317,8 @@ async function deleteConnection(conn) {
 const FILTERS = [
   ["all", "All", (c) => c.total], ["errors", "Errors", (c) => c.errors], ["warnings", "Warnings", (c) => c.warnings],
   ["create", "To create", (c) => c.ops.create || 0], ["delete", "To delete", (c) => c.ops.delete || 0],
+  ["update", "To update", (c) => c.ops.update || 0], ["request", "To request", (c) => c.ops.request || 0],
+  ["cancel", "To cancel", (c) => c.ops.cancel || 0], ["forward", "To forward", (c) => c.ops.forward || 0],
   ["skip", "Skip", (c) => c.ops.skip || 0], ["excluded", "Excluded", (c) => c.excluded],
   ["pending", "Pending", (c) => c.status.pending], ["succeeded", "Succeeded", (c) => c.status.succeeded],
   ["skipped", "Skipped", (c) => c.status.skipped], ["failed", "Failed", (c) => c.status.failed],
@@ -387,7 +400,7 @@ async function renderJob(jobId) {
       h("div", { class: "row spread" },
         h("div", {}, h("h1", {}, j.name), h("div", { class: "muted small" }, `${j.action_title} · `, j.connection.name, " ", envBadge(j.connection.environment), j.source_file ? ` · ${j.source_file}` : "", ` · created ${fmtTime(j.created_at)}`,
           j.parent ? h("span", {}, " · created from ", h("a", { href: `#/jobs/${j.parent.id}` }, j.parent.name)) : null)),
-        badge(j.status)),
+        h("div", { class: "row" }, j.experimental ? experimentalBadge() : null, badge(j.status))),
       h("div", { class: "stepper" }, steps.map(([label], i) => h("div", { class: "step " + (i < currentIdx || j.status === "completed" ? "done" : i === currentIdx ? "current" : "") }, label))),
       banners,
       h("div", { class: "progress", title: "succeeded / skipped / failed / running" },
@@ -575,8 +588,95 @@ function changeSummary(p) {
     const groups = (p.accessRequestConfig.approvalSchemes || []).filter((a) => a.approverType === "GOVERNANCE_GROUP").length;
     return `${p.entitlements.length} entitlement(s) · owner ${p.owner.name || p.owner.id}` + (groups ? ` · ${groups} approver group(s)` : "");
   }
-  if (p.group) return `owner ${p.group.owner.name || p.group.owner.id} · ${p.members.length} member(s)`;
+  if (p.group && p.members) return `owner ${p.group.owner.name || p.group.owner.id} · ${p.members.length} member(s)`;
+  if (p.group && p.add) return `+${p.add.length} / −${p.remove.length} member(s)`;
+  if (p.after) return Object.keys(p.after).map((f) => (p.labels && p.labels[f] ? `${f}: ${p.labels[f][0]} → ${p.labels[f][1]}` : `${f}: ${fmtValue(p.before[f])} → ${fmtValue(p.after[f])}`)).join(" · ");
+  if (p.requestType) return `${p.requestType === "GRANT_ACCESS" ? "grant" : "revoke"} for ${p.display.identity}`;
+  if (p.new_owner) return `→ ${p.new_owner}`;
   return p.id ? p.id : "";
+}
+
+function fmtValue(v) {
+  if (Array.isArray(v)) return v.length ? `${v.length} item(s)` : "none";
+  if (v === true) return "yes";
+  if (v === false) return "no";
+  return v === null || v === undefined || v === "" ? "empty" : String(v).length > 40 ? String(v).slice(0, 37) + "…" : String(v);
+}
+
+// ------------------------------------------------------------------ experimental
+function experimentalBadge() {
+  return h("span", { class: "badge b-warn", title: "Built from the API documentation; tested only against the offline sandbox" }, "experimental");
+}
+function experimentalBanner() {
+  return h("div", { class: "banner warn" }, h("strong", {}, "Experimental. "),
+    "Built from the SailPoint API documentation and tested only against the offline sandbox. Try it on a sandbox or test tenant first and check the results before using it in production.");
+}
+
+// ------------------------------------------------------------------ reports
+async function renderReports() {
+  const [conns, recent] = await Promise.all([api("GET", "/api/connections"), api("GET", "/api/reports")]);
+  if (!conns.length) {
+    view.replaceChildren(h("h1", {}, "Reports"), h("div", { class: "panel empty" }, "Add a connection first. ", h("a", { href: "#/connections" }, "Go to connections")));
+    return;
+  }
+  const connSel = h("select", {}, conns.map((c) => h("option", { value: c.id }, `${c.name} (${c.environment})`)));
+  const repSel = h("select", {}, META.reports.map((r) => h("option", { value: r.key }, r.title)));
+  const details = h("div");
+  const inputs = {};
+  const refresh = () => {
+    const r = META.reports.find((x) => x.key === repSel.value);
+    const followup = r.followup_action && META.actions.find((a) => a.key === r.followup_action);
+    Object.keys(inputs).forEach((k) => delete inputs[k]);
+    details.replaceChildren(h("p", { class: "muted" }, r.description),
+      followup ? h("p", { class: "small muted" }, "Findings can be exported as a CSV for ", h("strong", {}, followup.title), ".") : null,
+      r.params.map((p) => { inputs[p.name] = h("input", { placeholder: p.help || "" }); return h("label", { class: "field" }, h("span", {}, p.label, p.required ? " *" : ""), inputs[p.name]); }));
+  };
+  repSel.addEventListener("change", refresh);
+  const runBtn = h("button", { class: "primary", onclick: () => guarded(async () => {
+    runBtn.disabled = true;
+    const params = Object.fromEntries(Object.entries(inputs).map(([k, el]) => [k, el.value]));
+    const res = await api("POST", "/api/reports", { connection_id: connSel.value, report: repSel.value, params }).finally(() => { runBtn.disabled = false; });
+    location.hash = `#/reports/${res.id}`;
+  }) }, "Run report");
+  view.replaceChildren(
+    h("div", { class: "row" }, h("h1", {}, "Reports"), experimentalBadge()),
+    h("div", { class: "banner info" }, "Reports are read-only: they only list findings. To fix something, export the findings as a CSV for the matching bulk action, fill in the blanks, and upload it as a new job — it is planned, reviewed and approved like any other job."),
+    experimentalBanner(),
+    h("div", { class: "grid2" },
+      h("div", { class: "panel" }, h("label", { class: "field" }, h("span", {}, "Connection"), connSel), h("label", { class: "field" }, h("span", {}, "Report"), repSel), details, runBtn),
+      h("div", { class: "panel" }, h("h2", {}, "Recent reports"), recent.length ? h("table", {}, h("tbody", {}, recent.map((r) => h("tr", { class: "clickable", onclick: () => { location.hash = `#/reports/${r.id}`; } },
+        h("td", {}, r.title, h("div", { class: "small muted" }, Object.values(r.params).filter(Boolean).join(", "))),
+        h("td", {}, badge(r.status, r.status === "completed" ? "b-ok" : r.status === "failed" ? "b-err" : "b-info")),
+        h("td", { class: "small" }, r.status === "completed" ? `${r.count} finding(s)` : ""),
+        h("td", { class: "small muted" }, fmtTime(r.created_at)))))) : h("p", { class: "muted" }, "None yet."))));
+  refresh();
+}
+
+async function renderReport(reportId) {
+  const load = async () => {
+    const r = await api("GET", `/api/reports/${reportId}`);
+    const def = META.reports.find((x) => x.key === r.report);
+    const followup = def && def.followup_action && META.actions.find((a) => a.key === def.followup_action);
+    const running = r.status === "running";
+    showView(
+      h("div", { class: "row spread" }, h("div", {}, h("h1", {}, r.title), h("div", { class: "small muted" }, `${fmtTime(r.created_at)} · scanned ${r.scanned} object(s)`, Object.values(r.params).filter(Boolean).length ? ` · ${Object.entries(r.params).filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`).join(", ")}` : "")),
+        h("div", { class: "row" }, experimentalBadge(), badge(r.status, r.status === "completed" ? "b-ok" : r.status === "failed" ? "b-err" : "b-info"))),
+      r.error ? h("div", { class: "banner err" }, r.error) : null,
+      running ? h("div", { class: "banner info" }, "Scanning the tenant (read-only)…") : null,
+      h("div", { class: "row", style: "margin-bottom:12px" },
+        running ? h("button", { onclick: () => guarded(async () => { await api("POST", `/api/reports/${reportId}/cancel`); load(); }) }, "Cancel") : null,
+        r.status === "completed" ? h("button", { onclick: () => download(`/api/reports/${reportId}/export.csv`) }, "Export findings CSV") : null,
+        r.status === "completed" && followup && r.count ? h("button", { class: "primary", onclick: () => download(`/api/reports/${reportId}/followup.csv`) }, `Download as “${followup.title}” CSV`) : null,
+        r.status === "completed" && followup && r.count ? h("a", { class: "btn", href: `#/new?action=${followup.key}` }, `Upload it as a new job →`) : null,
+        h("button", { class: "danger", onclick: () => guarded(async () => { await api("DELETE", `/api/reports/${reportId}`); location.hash = "#/reports"; }) }, "Delete")),
+      r.status === "completed" && followup && r.count ? h("p", { class: "small muted" }, `The download contains one row per finding with the columns of “${followup.title}”. Fill in the blank values (rows you leave empty will show as errors you can exclude), then upload it.`) : null,
+      r.status === "completed" ? h("div", { class: "panel" }, r.rows.length ? h("table", {},
+        h("thead", {}, h("tr", {}, def.columns.map((c) => h("th", {}, c)))),
+        h("tbody", {}, r.rows.map((row) => h("tr", {}, def.columns.map((c) => h("td", { class: c === "id" ? "mono" : "" }, row[c] ?? "")))))) : h("div", { class: "empty" }, "No findings 🎉"),
+      r.count > r.rows.length ? h("p", { class: "small muted" }, `Showing ${r.rows.length} of ${r.count}; the CSV export has all of them.`) : null) : null);
+    return running;
+  };
+  if (await load()) pollTimer = setInterval(async () => { if (!(await load().catch(() => false))) { clearInterval(pollTimer); pollTimer = null; } }, 1500);
 }
 
 // ------------------------------------------------------------------ approval
@@ -586,6 +686,7 @@ async function approveDialog(jobId, onDone) {
   const confirmInput = p.requires_confirmation_text ? h("input", { placeholder: p.requires_confirmation_text, autocomplete: "off" }) : null;
   const ops = Object.entries(p.ops).map(([op, n]) => h("div", { class: "stat" }, h("b", {}, n), badge(op)));
   openModal(h("h2", {}, "Review and approve the plan"),
+    p.experimental ? experimentalBanner() : null,
     p.connection.environment === "production" ? h("div", { class: "banner prod" }, `These changes will be made in PRODUCTION (${p.connection.name}).`) : h("div", { class: "banner info" }, `Target: ${p.connection.name} (${p.connection.environment})`),
     h("div", { class: "stats" }, ops, h("div", { class: "stat" }, h("b", {}, p.excluded), h("span", { class: "muted small" }, "excluded")), h("div", { class: "stat" }, h("b", {}, p.warnings), h("span", { class: "muted small" }, "with warnings"))),
     h("h3", {}, `First ${p.sample.length} of ${p.total_changes} change(s)`),

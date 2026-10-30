@@ -1,4 +1,6 @@
 """Bulk create and bulk delete of access profiles."""
+import re
+
 from ..connectors.base import AuthError, ConfigError, ConnectorError
 from ..util import parse_bool, split_list
 from .base import Action, Column, ItemFailed, Option, Outcome, Plan, msg
@@ -27,7 +29,9 @@ def _lookup_one(ctx, kind, key, fn, field_name, label, messages, shown=None):
         return None
     shown = key if shown is None else shown
     if not found:
-        messages.append(msg("error", f"{label} '{shown}' was not found", field_name, "not_found"))
+        hint = " (the identity may have been deleted)" if kind == "identity" and re.fullmatch(r"[0-9a-f]{32}", str(shown)) \
+            else ""
+        messages.append(msg("error", f"{label} '{shown}' was not found{hint}", field_name, "not_found"))
         return None
     if len(found) > 1:
         messages.append(msg("error", f"{label} '{shown}' matches {len(found)} records; use the ID instead",

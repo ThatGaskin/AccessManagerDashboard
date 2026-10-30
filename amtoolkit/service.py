@@ -13,6 +13,7 @@ from .actions import ACTIONS, PlanContext, get_action
 from .connectors import ConnectionManager, KINDS
 from .db import Database
 from .engine import Engine, JobStateError, plan_item, recheck_duplicates
+from .reports import REPORTS, ReportRunner
 from .store import EDITABLE_ITEM_STATUSES, NotFound, Store
 from .util import now_iso
 
@@ -31,6 +32,7 @@ class Toolkit:
         self.connections = ConnectionManager(self.store, self.data_dir)
         self.engine = Engine(self.store, self.connections)
         self.engine.recover()
+        self.reports = ReportRunner(self.db, self.connections)
 
     # ---------------------------------------------------------------- connections
     def connection_view(self, conn):
@@ -126,6 +128,7 @@ class Toolkit:
         return dict(job, counts=counts, approved=approved, active=active, blockers=blockers, allowed=allowed,
                     missing_governance_groups=missing_groups, parent=parent,
                     action_title=action.title if action else job["action"],
+                    experimental=bool(action and action.experimental),
                     connection={"id": conn["id"], "name": conn["name"], "environment": conn["environment"],
                                 "kind": conn["kind"], "secret_status": self.connections.secret_status(conn)})
 
@@ -235,6 +238,7 @@ class Toolkit:
             "sample": [{"row_no": i["row_no"], "op": i["op"], "target": i["target"], "payload": i["payload"]}
                        for i in changes[:sample]],
             "total_changes": len(changes),
+            "experimental": view["experimental"],
         }
 
     def approve(self, job_id, fingerprint, confirmation=None, approver=""):
@@ -277,7 +281,7 @@ class Toolkit:
         rows = [(i["row_no"], action.rollback_row(i)) for i in self.store.all_items(job_id)]
         rows = [(n, r) for n, r in rows if r]
         if not rows:
-            raise JobStateError("Nothing was created by this job, so there is nothing to roll back")
+            raise JobStateError("This job made no changes that can be rolled back")
         inverse = get_action(action.inverse)
         new_id = self.create_job(name=f"Rollback of {job['name']}", action_key=inverse.key,
                                  connection_id=job["connection_id"], options={}, filename=None, data=None,
@@ -307,6 +311,22 @@ class Toolkit:
                              f"Created a job to add {len(names)} missing governance group(s): {', '.join(names)}. "
                              "Re-plan this job after it has run.", data={"job_id": new_id, "groups": names})
         return new_id
+
+    def report_csv(self, report_id):
+        rep = self.reports.get(report_id)
+        cols = REPORTS[rep["report"]].columns
+        return csvio.write(cols, [[r.get(c, "") for c in cols] for r in rep["rows"]])
+
+    def report_followup_csv(self, report_id):
+        """The report's findings as a ready-to-edit CSV for the action that fixes them."""
+        rep = self.reports.get(report_id)
+        definition = REPORTS[rep["report"]]
+        if not definition.followup_action:
+            raise ValueError("This report has no follow-up action")
+        action = get_action(definition.followup_action)
+        cols = action.column_names()
+        rows = [definition.followup_row(r) for r in rep["rows"]]
+        return action, csvio.write(cols, [[r.get(c, "") for c in cols] for r in rows])
 
     def delete_job(self, job_id):
         job = self.store.get_job(job_id)

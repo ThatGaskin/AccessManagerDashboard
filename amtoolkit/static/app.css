@@ -91,3 +91,5 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
 .banner ul.notes { margin: 6px 0 0; padding-left: 18px; }
 .banner ul.notes li { margin-bottom: 4px; }
 .banner button { margin-left: 6px; }
+.topbar nav .badge { font-size: 10px; padding: 0 6px; margin-left: 2px; }
+h2 .badge, h1 + .badge { margin-left: 8px; vertical-align: middle; }

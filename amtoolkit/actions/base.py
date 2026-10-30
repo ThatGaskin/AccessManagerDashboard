@@ -83,6 +83,8 @@ class Action:
     columns: list = []
     options: list = []
     inverse = None  # key of the action that undoes this one
+    # Experimental actions are built from the API documentation but not yet verified against a real tenant.
+    experimental = False
 
     def column_names(self):
         return [c.name for c in self.columns]
@@ -128,4 +130,4 @@ class Action:
     def to_dict(self):
         return {"key": self.key, "title": self.title, "description": self.description,
                 "columns": [c.to_dict() for c in self.columns], "options": [o.to_dict() for o in self.options],
-                "inverse": self.inverse}
+                "inverse": self.inverse, "experimental": self.experimental}

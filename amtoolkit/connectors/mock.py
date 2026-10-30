@@ -7,6 +7,7 @@ import time
 import uuid
 from pathlib import Path
 
+from . import model
 from .base import Connector, ConnectorError, Field, Interrupted
 
 SEED = {
@@ -37,6 +38,32 @@ for _src, _names in (("2c91808568c529c60168cca6f90c1301",
     for _i, _name in enumerate(_names):
         SEED["entitlements"].append({"id": f"{_src[:24]}{len(SEED['entitlements']):08x}", "source_id": _src,
                                      "name": _name, "value": f"CN={_name},OU=Groups" if _src.endswith("1301") else _name})
+
+# Extra seed data so the experimental features and reports have something to work on.
+_ALICE = {"type": "IDENTITY", "id": "2c9180835d2e5168015d32f890ca1581", "name": "Alice Admin"}
+_GONE = {"type": "IDENTITY", "id": "2c9180835d2e5168015d32f8900dead0", "name": "Former Employee"}
+for _e in SEED["entitlements"]:
+    _e.update(description="" if _e["name"].endswith("Write") or _e["name"] == "IT-Admins" else f"Grants {_e['name']}",
+              owner=None if _e["name"] in ("IT-Admins", "Payroll Admin") else dict(_ALICE),
+              privileged=_e["name"] in ("IT-Admins", "System Administrator", "Payroll Admin"), requestable=True)
+for _s in SEED["sources"]:
+    _s["owner"] = dict(_GONE) if _s["name"] == "Workday" else dict(_ALICE)
+SEED["access_profiles"].append({
+    "id": "8f1e2d3c4b5a69788796a5b4c3d2e1f0", "name": "Legacy VPN", "description": None, "owner": dict(_GONE),
+    "source": {"type": "SOURCE", "id": "2c91808568c529c60168cca6f90c1301", "name": "Active Directory"},
+    "entitlements": [{"type": "ENTITLEMENT", "id": SEED["entitlements"][1]["id"], "name": "VPN Users"}],
+    "enabled": True, "requestable": True,
+    "accessRequestConfig": {"commentsRequired": False, "denialCommentsRequired": False, "approvalSchemes": []}})
+SEED["roles"] = []
+SEED["access_requests"] = []
+SEED["approvals"] = [
+    {"id": "a1b2c3d4e5f60718293a4b5c6d7e8f90", "owner_id": "2c9180835d2e5168015d32f890ca1582",
+     "requested_for": "Carol Owner", "item_name": "Finance - Read", "state": "PENDING"},
+    {"id": "a1b2c3d4e5f60718293a4b5c6d7e8f91", "owner_id": "2c9180835d2e5168015d32f890ca1582",
+     "requested_for": "Alice Admin", "item_name": "Sales - Manager", "state": "PENDING"},
+]
+COLLECTIONS = {"access_profile": "access_profiles", "role": "roles", "entitlement": "entitlements",
+               "source": "sources", "governance_group": "governance_groups"}
 
 _lock = threading.Lock()
 
@@ -182,4 +209,163 @@ class MockTenant(Connector):
             state["governance_groups"] = [g for g in state["governance_groups"] if g["id"] != group_id]
             if len(state["governance_groups"]) == before:
                 raise ConnectorError("Not found", status=404)
+            self._save(state)
+
+    # ---------------------------------------------------------------- generic objects (experimental)
+    @staticmethod
+    def _view(type_, obj, state):
+        view = dict(obj)
+        if type_ == "entitlement":
+            src = next((x for x in state["sources"] if x["id"] == obj["source_id"]), {})
+            view["source"] = {"type": "SOURCE", "id": obj["source_id"], "name": src.get("name")}
+        if type_ == "governance_group":
+            view["memberCount"] = len(obj.get("members", []))
+        return model.normalize(type_, view)
+
+    def get_object(self, type_, object_id):
+        self._delay()
+        with _lock:
+            state = self._state()
+            obj = next((o for o in state[COLLECTIONS[type_]] if o["id"] == object_id), None)
+            return self._view(type_, obj, state) if obj else None
+
+    def find_objects(self, type_, ref, source_id=None):
+        self._delay()
+        v = ref.strip().lower()
+        with _lock:
+            state = self._state()
+            objs = [o for o in state[COLLECTIONS[type_]] if not source_id or o.get("source_id", source_id) == source_id]
+            found = [o for o in objs if o["id"].lower() == v or (o.get("name") or "").lower() == v]
+            if not found and type_ == "entitlement":
+                found = [o for o in objs if (o.get("value") or "").lower() == v]
+            return [self._view(type_, o, state) for o in found]
+
+    def list_objects(self, type_, limit=20000, abort_event=None):
+        self._delay()
+        with _lock:
+            state = self._state()
+            objs = [self._view(type_, o, state) for o in state[COLLECTIONS[type_]][:limit]]
+        yield from objs
+
+    def patch_object(self, type_, object_id, changes):
+        self._delay()
+        self._maybe_fail()
+        with _lock:
+            state = self._state()
+            obj = next((o for o in state[COLLECTIONS[type_]] if o["id"] == object_id), None)
+            if obj is None:
+                raise ConnectorError("Not found", status=404)
+            ops = model.to_patch(changes)
+            for op in ops:
+                if op["path"] == "/owner":
+                    ident = next((i for i in state["identities"] if i["id"] == op["value"]["id"]), None)
+                    if ident is None:
+                        raise ConnectorError("HTTP 400: owner identity not found", status=400)
+                    op["value"]["name"] = ident["name"]
+            model.apply_patch(obj, ops)
+            self._save(state)
+
+    def create_role(self, payload):
+        self._delay()
+        self._maybe_fail()
+        with _lock:
+            state = self._state()
+            if any(r["name"].lower() == payload["name"].lower() for r in state["roles"]):
+                raise ConnectorError(f"HTTP 400: Role '{payload['name']}' already exists", status=400)
+            role = dict(payload, id=uuid.uuid4().hex)
+            state["roles"].append(role)
+            self._save(state)
+        return role
+
+    def delete_role(self, role_id):
+        self._delay()
+        with _lock:
+            state = self._state()
+            before = len(state["roles"])
+            state["roles"] = [r for r in state["roles"] if r["id"] != role_id]
+            if len(state["roles"]) == before:
+                raise ConnectorError("Not found", status=404)
+            self._save(state)
+
+    def list_governance_group_members(self, group_id):
+        self._delay()
+        with _lock:
+            state = self._state()
+            group = next((g for g in state["governance_groups"] if g["id"] == group_id), None)
+            if group is None:
+                raise ConnectorError("Not found", status=404)
+            names = {i["id"]: i["name"] for i in state["identities"]}
+            return [{"id": m, "name": names.get(m)} for m in group["members"]]
+
+    def remove_governance_group_members(self, group_id, identity_ids):
+        self._delay()
+        with _lock:
+            state = self._state()
+            group = next((g for g in state["governance_groups"] if g["id"] == group_id), None)
+            if group is None:
+                raise ConnectorError("Not found", status=404)
+            group["members"] = [m for m in group["members"] if m not in set(identity_ids)]
+            self._save(state)
+        return []
+
+    def find_access_requests(self, identity_id):
+        self._delay()
+        with _lock:
+            return [dict(r) for r in self._state()["access_requests"]
+                    if r["requested_for"] == identity_id and r["state"] == "PENDING"]
+
+    def get_access_request(self, request_id):
+        self._delay()
+        with _lock:
+            return next((dict(r) for r in self._state()["access_requests"] if r["id"] == request_id), None)
+
+    def submit_access_request(self, payload):
+        self._delay()
+        self._maybe_fail()
+        with _lock:
+            state = self._state()
+            created = []
+            for who in payload["requestedFor"]:
+                for item in payload["requestedItems"]:
+                    if any(r["requested_for"] == who and r["item_id"] == item["id"] and r["state"] == "PENDING"
+                           for r in state["access_requests"]):
+                        raise ConnectorError("HTTP 400: an access request for this item is already pending",
+                                             status=400)
+                    req = {"id": uuid.uuid4().hex, "state": "PENDING", "request_type": payload["requestType"],
+                           "item_id": item["id"], "item_name": item.get("name"), "requested_for": who}
+                    state["access_requests"].append(req)
+                    created.append(req)
+            self._save(state)
+        return {"newRequests": created}
+
+    def cancel_access_request(self, request_id, comment):
+        self._delay()
+        with _lock:
+            state = self._state()
+            req = next((r for r in state["access_requests"] if r["id"] == request_id), None)
+            if req is None or req["state"] != "PENDING":
+                raise ConnectorError("HTTP 400: request is not pending", status=400)
+            req["state"] = "CANCELLED"
+            self._save(state)
+
+    def get_pending_approval(self, approval_id):
+        self._delay()
+        with _lock:
+            state = self._state()
+            a = next((a for a in state["approvals"] if a["id"] == approval_id and a["state"] == "PENDING"), None)
+            if a is None:
+                return None
+            names = {i["id"]: i["name"] for i in state["identities"]}
+            return {"id": a["id"], "approver_id": a["owner_id"], "approver_name": names.get(a["owner_id"]),
+                    "requested_for": a["requested_for"], "item_name": a["item_name"]}
+
+    def forward_approval(self, approval_id, new_owner_id, comment):
+        self._delay()
+        self._maybe_fail()
+        with _lock:
+            state = self._state()
+            a = next((a for a in state["approvals"] if a["id"] == approval_id and a["state"] == "PENDING"), None)
+            if a is None:
+                raise ConnectorError("HTTP 404: approval not found", status=404)
+            a["owner_id"] = new_owner_id
             self._save(state)

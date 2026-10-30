@@ -7,7 +7,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS connections (
@@ -70,6 +70,19 @@ CREATE TABLE IF NOT EXISTS events (
     data      TEXT
 );
 CREATE INDEX IF NOT EXISTS events_job ON events(job_id, id);
+
+CREATE TABLE IF NOT EXISTS reports (
+    id             TEXT PRIMARY KEY,
+    connection_id  TEXT NOT NULL,
+    report         TEXT NOT NULL,
+    params         TEXT NOT NULL DEFAULT '{}',
+    status         TEXT NOT NULL,
+    scanned        INTEGER NOT NULL DEFAULT 0,
+    rows           TEXT,
+    error          TEXT,
+    created_at     TEXT NOT NULL,
+    finished_at    TEXT
+);
 """
 
 

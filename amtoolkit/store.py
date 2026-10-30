@@ -8,7 +8,7 @@ from .util import dumps, fingerprint, loads, new_id, now_iso
 JOB_STATUSES = ("planning", "review", "approved", "running", "pausing", "paused", "completed", "cancelled")
 ACTIVE_STATUSES = ("planning", "running", "pausing")
 ITEM_STATUSES = ("pending", "running", "succeeded", "skipped", "failed")
-EXECUTABLE_OPS = ("create", "delete", "update", "skip")
+EXECUTABLE_OPS = ("create", "delete", "update", "request", "cancel", "forward", "skip")
 # Items that have been run (or are being run) can no longer be edited.
 EDITABLE_ITEM_STATUSES = ("pending", "failed")
 IN_DOUBT = dumps({"in_doubt": True})
@@ -184,10 +184,8 @@ class Store:
         "succeeded": "AND included = 1 AND status = 'succeeded'",
         "skipped": "AND included = 1 AND status = 'skipped'",
         "failed": "AND included = 1 AND status = 'failed'",
-        "create": "AND included = 1 AND op = 'create'",
-        "delete": "AND included = 1 AND op = 'delete'",
-        "skip": "AND included = 1 AND op = 'skip'",
     }
+    ITEM_FILTERS.update({op: f"AND included = 1 AND op = '{op}'" for op in EXECUTABLE_OPS})
 
     def list_items(self, job_id, filter_name="all", q="", offset=0, limit=100):
         where = self.ITEM_FILTERS.get(filter_name, "")
