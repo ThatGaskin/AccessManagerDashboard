@@ -37,10 +37,9 @@ def obj(toolkit, conn, type_, id_):
     return toolkit.connections.build(conn["id"]).get_object(type_, id_)
 
 
-def test_actions_and_reports_are_marked_experimental(client):
+def test_everything_is_marked_experimental(client):
     meta = client.get("/api/meta").get_json()
-    flags = {a["key"]: a["experimental"] for a in meta["actions"]}
-    assert flags["access_profile.create"] is False and flags["ownership.reassign"] is True
+    assert meta["actions"] and all(a["experimental"] for a in meta["actions"])
     assert meta["reports"] and all(r["experimental"] for r in meta["reports"])
 
 

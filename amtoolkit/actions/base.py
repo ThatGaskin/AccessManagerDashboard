@@ -100,7 +100,8 @@ class Action:
     options: list = []
     inverse = None  # key of the action that undoes this one
     # Experimental actions are built from the API documentation but not yet verified against a real tenant.
-    experimental = False
+    # Nothing has been verified yet, so this is the default; set it to False on an action once it has been.
+    experimental = True
 
     def column_names(self):
         return [c.name for c in self.columns]

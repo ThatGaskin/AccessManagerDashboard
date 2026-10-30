@@ -1,4 +1,10 @@
+<img src="amtoolkit/static/logo.svg" alt="" width="64" height="64">
+
 # Access Manager Toolkit
+
+> **Experimental — everything.** No part of the toolkit has been tested against a real tenant yet; it
+> was built from the SailPoint API documentation and tested only against the offline Sandbox. Try it on a
+> sandbox or test tenant first and check the results before using it in production.
 
 A local, browser-based toolkit for the bulk operations access managers do — **creating access profiles
 and governance groups from CSV files** (and rolling them back). It talks to the target system's REST API,
@@ -214,12 +220,16 @@ Members are added right after the group is created. If that step fails, the row 
 ID and **Retry failed** only adds the members to the existing group. Rollback deletes the groups the
 job created. See `examples/governance_groups_sandbox.csv`.
 
-## Experimental features
+## More actions and reports
 
-These are marked **experimental** throughout the UI (action picker, job pages, approval dialog, Reports
-page). They were built from the SailPoint ISC API documentation and are tested end-to-end against the
-offline sandbox only — **try them on a sandbox or test tenant first.** They use the same safety model as
-everything else: read-only plan, approval bound to the plan, pause/resume, audit log, rollback.
+Like the rest of the toolkit, these are marked **experimental** throughout the UI (top bar, job pages,
+approval dialog, Reports page). They were built from the SailPoint ISC API documentation and are tested
+end-to-end against the offline sandbox only — **try them on a sandbox or test tenant first.** They use
+the same safety model as everything else: read-only plan, approval bound to the plan, pause/resume,
+audit log, rollback.
+
+An action is marked experimental unless it sets `experimental = False` (see `amtoolkit/actions/base.py`);
+do that only once it has been verified against a real tenant.
 
 | Action | What it does | Rollback |
 |---|---|---|
@@ -257,7 +267,7 @@ Identity parameters (e.g. *Objects owned by an identity*) use a search-as-you-ty
 Reports read up to 20,000 objects per type. Not covered yet: certification campaign management and
 leaver verification.
 
-API used (in addition to the stable features): `PATCH` with JSON Patch on `/v3/access-profiles`,
+API used (in addition to the access profile and governance group features): `PATCH` with JSON Patch on `/v3/access-profiles`,
 `/v3/roles`, `/v3/sources`, `/{beta|v2025}/entitlements`, `/{beta|v2025}/workgroups`; `GET/POST/DELETE
 /v3/roles`; `workgroups/{id}/members` and `members/bulk-delete`; `/v3/access-requests`,
 `/v3/access-requests/cancel`, `/v3/access-request-status`; `/v3/access-request-approvals/pending` and
