@@ -185,3 +185,8 @@ button.link.hist { font-size: 11px; margin-left: 6px; opacity: .8; }
 .legend > span { display: inline-flex; align-items: center; gap: 4px; }
 table.copy input.override { font-size: 12px; padding: 3px 6px; }
 [hidden] { display: none !important; }
+.new-attrs { margin-top: 6px; color: var(--text); }
+.new-attrs summary { cursor: pointer; color: var(--link); }
+.new-attrs ul { list-style: none; margin: 4px 0 0; padding: 0; }
+.new-attrs li { padding: 2px 0; }
+.new-attrs .badge { margin-left: 6px; }

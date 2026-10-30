@@ -1361,6 +1361,7 @@ function historyDialog({ type, title, attribute, sides }) {
 
 async function renderCompare(compareId) {
   const picked = new Map(); // source_id -> Set of attributes (empty set for new objects)
+  const openNew = new Set(); // new objects whose attribute list is expanded, kept open across redraws
   let filter = "changes";
   // A mark applies to the attribute in every object of the comparison: marked environment-specific, it is
   // unticked everywhere; unmarked, it is ticked wherever it differs in an object that is selected.
@@ -1439,7 +1440,12 @@ async function renderCompare(compareId) {
       } else if (row.status === "new") {
         const kept = row.diffs.filter((d) => d.env_specific).map((d) => d.label);
         detail = h("div", { class: "small muted" }, `Not in ${r.target.name} — will be created with all copyable attributes.`,
-          kept.length ? ` Not copied (environment-specific): ${kept.join(", ")}. To give them values for ${r.target.name}, copy it from the Copy page and fill in “Use instead”.` : "");
+          kept.length ? ` Not copied (environment-specific): ${kept.join(", ")}. To give them values for ${r.target.name}, copy it from the Copy page and fill in “Use instead”.` : "",
+          h("details", { class: "new-attrs", open: openNew.has(row.source_id), ontoggle: (e) => { e.target.open ? openNew.add(row.source_id) : openNew.delete(row.source_id); } },
+            h("summary", {}, `Attributes (${row.diffs.length})`),
+            h("ul", {}, row.diffs.map((d) => h("li", {}, h("span", { class: "mono" }, d.label),
+              d.required ? h("span", { class: "badge", title: "Needed to create it; copied even when environment-specific" }, "required") : null,
+              envMark(r.type, d, (res) => remark(r, d, res)))))));
       } else if (row.status === "ambiguous") {
         detail = h("div", { class: "small", style: "color:var(--err)" }, row.problem);
       }
