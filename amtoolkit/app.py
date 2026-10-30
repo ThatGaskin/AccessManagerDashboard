@@ -264,8 +264,18 @@ def create_app(data_dir, *, allowed_hosts=None):
         offset = max(0, request.args.get("offset", 0, type=int))
         limit = min(500, max(1, request.args.get("limit", 100, type=int)))
         total, items = toolkit.store.list_items(job_id, request.args.get("filter", "all"),
-                                                request.args.get("q", "").strip(), offset, limit)
-        return jsonify(total=total, offset=offset, items=items)
+                                                request.args.get("q", "").strip(), offset, limit,
+                                                request.args.get("attribute") or None)
+        return jsonify(total=total, offset=offset, items=items,
+                       attributes=toolkit.store.changed_attributes(job_id))
+
+    @app.get("/api/jobs/<job_id>/items/ids")
+    def matching_item_ids(job_id):
+        """The rows a filter matches across all pages, for selecting them all."""
+        toolkit.store.get_job(job_id)
+        return jsonify(ids=toolkit.store.matching_item_ids(job_id, request.args.get("filter", "all"),
+                                                           request.args.get("q", "").strip(),
+                                                           request.args.get("attribute") or None))
 
     @app.get("/api/jobs/<job_id>/items/<int:item_id>")
     def get_item(job_id, item_id):
@@ -285,7 +295,7 @@ def create_app(data_dir, *, allowed_hosts=None):
     @app.post("/api/jobs/<job_id>/include")
     def include(job_id):
         data = body()
-        ids = [int(i) for i in data.get("ids", [])][:10000]
+        ids = [int(i) for i in data.get("ids", [])][:100000]
         if not ids:
             abort(400, "No rows selected")
         included = bool(data.get("included"))
