@@ -19,7 +19,12 @@ async function api(method, path, body, isForm) {
   const resp = await fetch(path, opts);
   let data = null;
   try { data = await resp.json(); } catch (_) { /* non-JSON */ }
-  if (!resp.ok) throw new Error((data && data.error) || `HTTP ${resp.status}`);
+  if (!resp.ok) {
+    const err = new Error((data && data.error) || `HTTP ${resp.status}`);
+    err.status = resp.status;
+    err.code = data && data.code;
+    throw err;
+  }
   return data;
 }
 
@@ -75,17 +80,51 @@ function openModal(...content) {
 }
 function closeModal() { if (modal.open) modal.close(); }
 
-function confirmDialog(title, text, okLabel, danger) {
+function download(url) { window.location.href = url; }
+
+// ------------------------------------------------------------------ confirmations
+// Every command first asks the server for a summary of exactly what will happen. The server signs it
+// against the job's current state; the command is only accepted with that token, the ticked checkbox and,
+// on production, the typed connection name. If the job changed in between, the server refuses (HTTP 428)
+// and a fresh summary is shown.
+function confirmationDialog(summary) {
   return new Promise((resolve) => {
     const done = (v) => { closeModal(); resolve(v); };
-    openModal(h("h2", {}, title), h("p", {}, text),
-      h("div", { class: "modal-actions" },
-        h("button", { onclick: () => done(false) }, "Back"),
-        h("button", { class: danger ? "danger" : "primary", onclick: () => done(true) }, okLabel)));
+    const check = h("input", { type: "checkbox", id: "confirm-check" });
+    const typed = summary.requires_text ? h("input", { placeholder: summary.requires_text, autocomplete: "off", spellcheck: "false" }) : null;
+    const ok = h("button", { class: summary.danger ? "danger" : "primary", disabled: true,
+      onclick: () => done({ token: summary.token, acknowledged: true, text: typed ? typed.value.trim() : null }) }, "Confirm");
+    const update = () => { ok.disabled = !(check.checked && (!typed || typed.value.trim() === summary.requires_text)); };
+    check.addEventListener("change", update);
+    if (typed) typed.addEventListener("input", update);
+    openModal(
+      h("h2", {}, summary.title),
+      summary.warnings.map((w) => h("div", { class: "banner " + (w.startsWith("PRODUCTION") ? "prod" : "warn") }, w)),
+      h("ul", { class: "summary" }, summary.lines.map((l) => h("li", {}, l))),
+      typed ? h("label", { class: "field" }, h("span", {}, `Type ${summary.requires_text} to confirm`), typed) : null,
+      h("label", { class: "confirm-check", for: "confirm-check" }, check, h("span", {}, summary.checkbox)),
+      h("p", { class: "small muted" }, `This summary is valid for ${Math.round(summary.expires_in / 60)} minutes and only for the job as it is now.`),
+      h("div", { class: "modal-actions" }, h("button", { onclick: () => done(null) }, "Back"), ok));
+    check.focus();
   });
 }
 
-function download(url) { window.location.href = url; }
+// Asks for a summary, shows it, and runs `send(confirmation)` once the user confirms. Retries with a fresh
+// summary if the server says the reviewed one is no longer current.
+async function confirmed(confirmUrl, command, params, send) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const summary = await api("POST", confirmUrl, { command, params: params || {} });
+    const confirmation = await confirmationDialog(summary);
+    if (!confirmation) return undefined;
+    try {
+      return await send(confirmation);
+    } catch (e) {
+      if (e.code !== "confirmation_required") throw e;
+      toast(e.message + " — showing the updated summary", true);
+    }
+  }
+  return undefined;
+}
 
 // ------------------------------------------------------------------ router
 const routes = [
@@ -309,8 +348,14 @@ function editConnection(conn, kind) {
 }
 
 async function deleteConnection(conn) {
-  if (!(await confirmDialog("Delete connection", `Delete '${conn.name}'? Jobs that use it must be deleted first.`, "Delete", true))) return;
-  await guarded(async () => { await api("DELETE", `/api/connections/${conn.id}`); route(); });
+  await guarded(async () => {
+    const summary = await api("POST", `/api/connections/${conn.id}/confirm`, {});
+    const confirmation = await confirmationDialog(summary);
+    if (!confirmation) return;
+    await api("DELETE", `/api/connections/${conn.id}`, { confirmation });
+    toast("Connection deleted");
+    route();
+  });
 }
 
 // ------------------------------------------------------------------ job detail
@@ -340,14 +385,20 @@ async function renderJob(jobId) {
     if (sig !== state.sig) { state.sig = sig; await renderBody(); }
   };
 
-  const doCommand = async (cmd, confirmText) => {
-    if (confirmText && !(await confirmDialog("Please confirm", confirmText, "Yes, continue", cmd === "cancel" || cmd === "rollback"))) return;
-    await guarded(async () => {
-      const res = await api("POST", `/api/jobs/${jobId}/${cmd}`);
-      if (cmd === "rollback") { toast("Rollback job created — review its plan before approving"); location.hash = `#/jobs/${res.id}`; return; }
-      await loadJob();
-    });
-  };
+  const confirmUrl = `/api/jobs/${jobId}/confirm`;
+  // Commands that are not plain POST /api/jobs/<id>/<command>.
+  const ENDPOINTS = { delete: ["DELETE", `/api/jobs/${jobId}`] };
+  const doCommand = (cmd) => guarded(async () => {
+    if (cmd === "pause") { await api("POST", `/api/jobs/${jobId}/pause`, {}); await loadJob(); return; } // always one click
+    const [method, url] = ENDPOINTS[cmd] || ["POST", `/api/jobs/${jobId}/${cmd}`];
+    const res = await confirmed(confirmUrl, cmd, {}, (confirmation) => api(method, url, { confirmation }));
+    if (res === undefined) return;
+    if (cmd === "rollback") { toast("Rollback job created — review its plan before approving"); location.hash = `#/jobs/${res.id}`; return; }
+    if (cmd === "delete") { toast("Job deleted"); location.hash = "#/"; return; }
+    if (cmd === "approve") toast("Plan approved. Press Start when you are ready.");
+    state.sig = "";
+    await loadJob();
+  });
 
   function renderHeader() {
     const j = state.job; const c = j.counts; const a = j.allowed;
@@ -362,19 +413,16 @@ async function renderJob(jobId) {
       if (perSec > 0) eta = `${perSec.toFixed(1)} rows/s · about ${Math.ceil(c.remaining / perSec / 60)} min left`;
     }
     const buttons = [
-      a.replan && h("button", { onclick: () => doCommand("plan", "Refresh the plan for all rows that have not run yet? Lookups are read-only; any approval is cleared.") }, "Re-plan"),
-      a.approve && h("button", { class: "primary", onclick: () => approveDialog(jobId, loadJob) }, "Review & approve…"),
-      a.start && h("button", { class: "primary", onclick: () => doCommand("start", `Start making ${c.remaining} change(s) in '${j.connection.name}' (${j.connection.environment})? You can pause at any time.`) }, "Start"),
-      a.resume && h("button", { class: "primary", onclick: () => doCommand("resume") }, "Resume"),
-      a.pause && h("button", { onclick: () => doCommand("pause") }, "Pause"),
-      a.retry_failed && h("button", { onclick: () => doCommand("retry-failed", `Queue ${c.status.failed} failed row(s) again?`) }, "Retry failed"),
-      a.rollback && h("button", { onclick: () => doCommand("rollback", `Create a rollback job that deletes the ${c.status.succeeded} item(s) this job created? It will open in review; nothing is deleted until you approve and start it.`) }, "Create rollback…"),
-      a.cancel && h("button", { class: "danger", onclick: () => doCommand("cancel", "Cancel this job? Rows that already ran stay as they are; remaining rows will not run. This cannot be resumed.") }, "Cancel job"),
+      a.replan && h("button", { onclick: () => doCommand("plan") }, "Re-plan…"),
+      a.approve && h("button", { class: "primary", onclick: () => doCommand("approve") }, "Review & approve…"),
+      a.start && h("button", { class: "primary", onclick: () => doCommand("start") }, "Start…"),
+      a.resume && h("button", { class: "primary", onclick: () => doCommand("resume") }, "Resume…"),
+      a.pause && h("button", { title: "Stops after the current row. No confirmation needed.", onclick: () => doCommand("pause") }, "Pause"),
+      a.retry_failed && h("button", { onclick: () => doCommand("retry-failed") }, "Retry failed…"),
+      a.rollback && h("button", { onclick: () => doCommand("rollback") }, "Create rollback…"),
+      a.cancel && h("button", { class: "danger", onclick: () => doCommand("cancel") }, "Cancel job…"),
       h("button", { onclick: () => download(`/api/jobs/${jobId}/export.csv`) }, "Export CSV"),
-      a.delete && h("button", { class: "danger", onclick: async () => {
-        if (!(await confirmDialog("Delete job", "Delete this job and its audit log from this computer? Changes already made in the target system are NOT undone.", "Delete", true))) return;
-        await guarded(async () => { await api("DELETE", `/api/jobs/${jobId}`); location.hash = "#/"; });
-      } }, "Delete"),
+      a.delete && h("button", { class: "danger", onclick: () => doCommand("delete") }, "Delete…"),
     ];
     const banners = [];
     if (j.connection.environment === "production") banners.push(h("div", { class: "banner prod" }, `PRODUCTION — ${j.connection.name}`));
@@ -393,7 +441,10 @@ async function renderJob(jobId) {
       const canReplan = ["review", "approved", "paused"].includes(j.parent.status);
       banners.push(h("div", { class: "banner info" }, "Groups are ready. Re-plan ", h("a", { href: `#/jobs/${j.parent.id}` }, j.parent.name),
         " so its rows pick them up. ",
-        canReplan ? h("button", { onclick: () => guarded(async () => { await api("POST", `/api/jobs/${j.parent.id}/plan`); location.hash = `#/jobs/${j.parent.id}`; }) }, "Re-plan that job now") : null));
+        canReplan ? h("button", { onclick: () => guarded(async () => {
+          const res = await confirmed(`/api/jobs/${j.parent.id}/confirm`, "plan", {}, (confirmation) => api("POST", `/api/jobs/${j.parent.id}/plan`, { confirmation }));
+          if (res) location.hash = `#/jobs/${j.parent.id}`;
+        }) }, "Re-plan that job now…") : null));
     }
 
     header.replaceChildren(h("div", { class: "panel" },
@@ -431,8 +482,8 @@ async function renderJob(jobId) {
     search.addEventListener("keydown", (e) => { if (e.key === "Enter") { state.q = search.value; state.offset = 0; renderBody(); } });
     const selectedIds = () => [...state.selected];
     const bulkBar = editable ? h("div", { class: "row" },
-      h("button", { disabled: !c.errors, onclick: () => bulk("exclude_errors", `Exclude all ${c.errors} row(s) with errors?`) }, "Exclude rows with errors"),
-      h("button", { disabled: !c.excluded, onclick: () => bulk("include_all", `Include all ${c.excluded} excluded row(s) again?`) }, "Include all"),
+      h("button", { disabled: !c.errors, onclick: () => bulk("exclude_errors") }, "Exclude rows with errors"),
+      h("button", { disabled: !c.excluded, onclick: () => bulk("include_all") }, "Include all"),
       h("button", { disabled: !state.selected.size, onclick: () => setIncluded(selectedIds(), false) }, `Exclude selected (${state.selected.size})`),
       h("button", { disabled: !state.selected.size, onclick: () => setIncluded(selectedIds(), true) }, "Include selected")) : null;
 
@@ -464,14 +515,16 @@ async function renderJob(jobId) {
         h("button", { disabled: page >= pages, onclick: () => { state.offset += state.limit; renderBody(); } }, "Next ›")) : null);
   }
 
-  async function bulk(op, text) {
-    if (!(await confirmDialog("Change included rows", text + " This clears any approval.", "Yes"))) return;
-    await guarded(async () => { const r = await api("POST", `/api/jobs/${jobId}/bulk`, { op }); toast(`${r.changed} row(s) updated`); state.sig = ""; await loadJob(); });
+  async function bulk(op) {
+    await guarded(async () => {
+      const r = await confirmed(confirmUrl, "bulk", { op }, (confirmation) => api("POST", `/api/jobs/${jobId}/bulk`, { op, confirmation }));
+      if (r) { toast(`${r.changed} row(s) updated`); state.sig = ""; await loadJob(); }
+    });
   }
   async function setIncluded(ids, included) {
     await guarded(async () => {
-      const r = await api("POST", `/api/jobs/${jobId}/include`, { ids, included });
-      toast(`${r.changed} row(s) ${included ? "included" : "excluded"}`); state.selected.clear(); state.sig = ""; await loadJob();
+      const r = await confirmed(confirmUrl, "include", { ids, included }, (confirmation) => api("POST", `/api/jobs/${jobId}/include`, { ids, included, confirmation }));
+      if (r) { toast(`${r.changed} row(s) ${included ? "included" : "excluded"}`); state.selected.clear(); state.sig = ""; await loadJob(); }
     });
   }
 
@@ -550,7 +603,7 @@ async function itemDialog(jobId, itemId, state, onChange) {
           h("p", { class: "small muted" }, `Revision ${item.revision} · attempts ${item.attempts} · updated ${fmtTime(item.updated_at)}`))),
       h("div", { class: "modal-actions" },
         editable ? h("button", { onclick: (e) => act(e, async () => {
-          await api("POST", `/api/jobs/${jobId}/include`, { ids: [itemId], included: !item.included });
+          await api("POST", `/api/jobs/${jobId}/include`, { ids: [itemId], included: !item.included, single_row: true });
           return api("GET", `/api/jobs/${jobId}/items/${itemId}`);
         }) }, item.included ? "Exclude row" : "Include row") : null,
         editable ? h("button", { onclick: (e) => act(e, () => api("POST", `/api/jobs/${jobId}/items/${itemId}/replan`)) }, "Re-check") : null,
@@ -576,9 +629,11 @@ function missingGroupsDialog(job) {
     h("label", { class: "field" }, h("span", {}, "Description"), description),
     h("div", { class: "modal-actions" }, h("button", { onclick: closeModal }, "Cancel"),
       h("button", { class: "primary", onclick: () => guarded(async () => {
-        const res = await api("POST", `/api/jobs/${job.id}/missing-governance-groups`, { owner: owner.value, members: members.value, description: description.value });
-        closeModal(); toast("Governance group job created — review it, then approve and start"); location.hash = `#/jobs/${res.id}`;
-      }) }, "Prepare job")));
+        const params = { owner: owner.value, members: members.value, description: description.value };
+        const res = await confirmed(`/api/jobs/${job.id}/confirm`, "missing-governance-groups", params,
+          (confirmation) => api("POST", `/api/jobs/${job.id}/missing-governance-groups`, { ...params, confirmation }));
+        if (res) { toast("Governance group job created — review it, then approve and start"); location.hash = `#/jobs/${res.id}`; }
+      }) }, "Prepare job…")));
   owner.focus();
 }
 
@@ -668,7 +723,12 @@ async function renderReport(reportId) {
         r.status === "completed" ? h("button", { onclick: () => download(`/api/reports/${reportId}/export.csv`) }, "Export findings CSV") : null,
         r.status === "completed" && followup && r.count ? h("button", { class: "primary", onclick: () => download(`/api/reports/${reportId}/followup.csv`) }, `Download as “${followup.title}” CSV`) : null,
         r.status === "completed" && followup && r.count ? h("a", { class: "btn", href: `#/new?action=${followup.key}` }, `Upload it as a new job →`) : null,
-        h("button", { class: "danger", onclick: () => guarded(async () => { await api("DELETE", `/api/reports/${reportId}`); location.hash = "#/reports"; }) }, "Delete")),
+        h("button", { class: "danger", onclick: () => guarded(async () => {
+          const ok = await confirmationDialog({ title: "Delete the report", lines: [`The results of '${r.title}' (${r.count} finding(s)) are removed from this computer`, "Nothing changes in the target system"],
+            warnings: [], danger: true, checkbox: "I have reviewed this summary and want to delete this report.", requires_text: null, token: null, expires_in: 600 });
+          if (!ok) return;
+          await api("DELETE", `/api/reports/${reportId}`); location.hash = "#/reports";
+        }) }, "Delete…")),
       r.status === "completed" && followup && r.count ? h("p", { class: "small muted" }, `The download contains one row per finding with the columns of “${followup.title}”. Fill in the blank values (rows you leave empty will show as errors you can exclude), then upload it.`) : null,
       r.status === "completed" ? h("div", { class: "panel" }, r.rows.length ? h("table", {},
         h("thead", {}, h("tr", {}, def.columns.map((c) => h("th", {}, c)))),
@@ -677,28 +737,6 @@ async function renderReport(reportId) {
     return running;
   };
   if (await load()) pollTimer = setInterval(async () => { if (!(await load().catch(() => false))) { clearInterval(pollTimer); pollTimer = null; } }, 1500);
-}
-
-// ------------------------------------------------------------------ approval
-async function approveDialog(jobId, onDone) {
-  const p = await guarded(() => api("GET", `/api/jobs/${jobId}/approval`));
-  if (!p) return;
-  const confirmInput = p.requires_confirmation_text ? h("input", { placeholder: p.requires_confirmation_text, autocomplete: "off" }) : null;
-  const ops = Object.entries(p.ops).map(([op, n]) => h("div", { class: "stat" }, h("b", {}, n), badge(op)));
-  openModal(h("h2", {}, "Review and approve the plan"),
-    p.experimental ? experimentalBanner() : null,
-    p.connection.environment === "production" ? h("div", { class: "banner prod" }, `These changes will be made in PRODUCTION (${p.connection.name}).`) : h("div", { class: "banner info" }, `Target: ${p.connection.name} (${p.connection.environment})`),
-    h("div", { class: "stats" }, ops, h("div", { class: "stat" }, h("b", {}, p.excluded), h("span", { class: "muted small" }, "excluded")), h("div", { class: "stat" }, h("b", {}, p.warnings), h("span", { class: "muted small" }, "with warnings"))),
-    h("h3", {}, `First ${p.sample.length} of ${p.total_changes} change(s)`),
-    h("table", {}, h("tbody", {}, p.sample.map((s) => h("tr", {}, h("td", { class: "mono" }, s.row_no), h("td", {}, badge(s.op)), h("td", {}, s.target),
-      h("td", { class: "small muted" }, changeSummary(s.payload)))))),
-    h("p", { class: "small muted" }, "Approval is bound to plan fingerprint ", h("span", { class: "mono" }, p.fingerprint.slice(0, 12)), ". If anything changes after this, you will have to approve again."),
-    confirmInput ? h("label", { class: "field" }, h("span", {}, `Type ${p.requires_confirmation_text} to confirm`), confirmInput) : null,
-    h("div", { class: "modal-actions" }, h("button", { onclick: closeModal }, "Back"),
-      h("button", { class: "primary", onclick: () => guarded(async () => {
-        await api("POST", `/api/jobs/${jobId}/approve`, { fingerprint: p.fingerprint, confirmation: confirmInput ? confirmInput.value : null });
-        closeModal(); toast("Plan approved. Press Start when you are ready."); onDone();
-      }) }, "Approve plan")));
 }
 
 // ------------------------------------------------------------------ boot

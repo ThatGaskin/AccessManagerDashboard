@@ -93,3 +93,7 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
 .banner button { margin-left: 6px; }
 .topbar nav .badge { font-size: 10px; padding: 0 6px; margin-left: 2px; }
 h2 .badge, h1 + .badge { margin-left: 8px; vertical-align: middle; }
+ul.summary { margin: 8px 0 14px; padding-left: 20px; }
+ul.summary li { margin-bottom: 4px; }
+label.confirm-check { display: flex; gap: 10px; align-items: flex-start; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); cursor: pointer; font-weight: 600; }
+label.confirm-check input { margin-top: 3px; width: 18px; height: 18px; }

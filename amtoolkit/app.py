@@ -18,6 +18,7 @@ from . import __version__
 from .actions import ACTIONS, get_action
 from .connectors import ENVIRONMENTS, ConnectorError, kinds_metadata
 from .csvio import CsvError, template
+from .confirm import ConfirmationRequired, Confirmer
 from .engine import JobStateError
 from .reports import REPORTS
 from .service import Toolkit
@@ -38,6 +39,8 @@ def create_app(data_dir, *, allowed_hosts=None):
     csrf_token = secrets.token_urlsafe(32)
     app.config["CSRF_TOKEN"] = csrf_token
     hosts = set(allowed_hosts or LOOPBACK)
+    confirmer = Confirmer(toolkit)
+    app.extensions["confirmer"] = confirmer
     operator = getpass.getuser()
 
     # ------------------------------------------------------------------ security
@@ -68,6 +71,10 @@ def create_app(data_dir, *, allowed_hosts=None):
     @app.errorhandler(NotFound)
     def not_found(exc):
         return jsonify(error=str(exc)), 404
+
+    @app.errorhandler(ConfirmationRequired)
+    def confirmation_required(exc):
+        return jsonify(error=str(exc), code="confirmation_required"), 428
 
     @app.errorhandler(JobStateError)
     def conflict(exc):
@@ -143,8 +150,13 @@ def create_app(data_dir, *, allowed_hosts=None):
     def update_connection(conn_id):
         return jsonify(toolkit.save_connection(body(), conn_id))
 
+    @app.post("/api/connections/<conn_id>/confirm")
+    def confirm_connection(conn_id):
+        return jsonify(confirmer.connection_summary(conn_id))
+
     @app.delete("/api/connections/<conn_id>")
     def delete_connection(conn_id):
+        confirmer.verify_connection(conn_id, (request.get_json(silent=True) or {}).get("confirmation"))
         toolkit.store.delete_connection(conn_id)
         toolkit.connections.forget(conn_id)
         return jsonify(ok=True)
@@ -186,8 +198,20 @@ def create_app(data_dir, *, allowed_hosts=None):
     def get_job(job_id):
         return jsonify(toolkit.job_view(job_id))
 
+    @app.post("/api/jobs/<job_id>/confirm")
+    def confirm_job(job_id):
+        data = body()
+        params = data.get("params") if isinstance(data.get("params"), dict) else {}
+        return jsonify(confirmer.job_summary(job_id, data.get("command", ""), params))
+
+    def confirmed(job_id, command, params=None):
+        """Every job command must carry a confirmation issued for exactly this command and job state."""
+        data = request.get_json(silent=True) or {}
+        confirmer.verify_job(job_id, command, params or {}, data.get("confirmation"))
+
     @app.delete("/api/jobs/<job_id>")
     def delete_job(job_id):
+        confirmed(job_id, "delete")
         toolkit.delete_job(job_id)
         return jsonify(ok=True)
 
@@ -221,22 +245,30 @@ def create_app(data_dir, *, allowed_hosts=None):
         ids = [int(i) for i in data.get("ids", [])][:10000]
         if not ids:
             abort(400, "No rows selected")
-        return jsonify(changed=toolkit.set_included(job_id, ids, bool(data.get("included"))))
+        included = bool(data.get("included"))
+        if not data.get("single_row"):  # toggling one row inside its editor is part of editing that row
+            confirmed(job_id, "include", {"ids": ids, "included": included})
+        return jsonify(changed=toolkit.set_included(job_id, ids, included))
 
     @app.post("/api/jobs/<job_id>/bulk")
     def bulk(job_id):
-        return jsonify(changed=toolkit.bulk(job_id, body().get("op")))
+        op = body().get("op")
+        confirmed(job_id, "bulk", {"op": op})
+        return jsonify(changed=toolkit.bulk(job_id, op))
 
     @app.post("/api/jobs/<job_id>/plan")
     def replan(job_id):
+        confirmed(job_id, "plan")
         toolkit.replan(job_id)
         return jsonify(ok=True)
 
     @app.post("/api/jobs/<job_id>/missing-governance-groups")
     def missing_groups(job_id):
         data = body()
-        new_id = toolkit.create_missing_governance_groups(job_id, data.get("owner"), data.get("description", ""),
-                                                          data.get("members", ""))
+        params = {k: str(data.get(k) or "") for k in ("owner", "members", "description")}
+        confirmed(job_id, "missing-governance-groups", params)
+        new_id = toolkit.create_missing_governance_groups(job_id, params["owner"], params["description"],
+                                                          params["members"])
         return jsonify(id=new_id), 201
 
     @app.get("/api/jobs/<job_id>/approval")
@@ -246,12 +278,18 @@ def create_app(data_dir, *, allowed_hosts=None):
     @app.post("/api/jobs/<job_id>/approve")
     def approve(job_id):
         data = body()
-        toolkit.approve(job_id, data.get("fingerprint", ""), data.get("confirmation"), operator)
+        confirmed(job_id, "approve")  # bound to the plan fingerprint the summary was built from
+        typed = (data.get("confirmation") or {}).get("text") if isinstance(data.get("confirmation"), dict) else None
+        toolkit.approve(job_id, toolkit.store.plan_fingerprint(job_id), typed, operator)
         return jsonify(toolkit.job_view(job_id))
 
     @app.post("/api/jobs/<job_id>/<command>")
     def command(job_id, command):
         toolkit.store.get_job(job_id)
+        if command not in ("start", "resume", "pause", "cancel", "retry-failed", "rollback"):
+            abort(404)
+        if command != "pause":  # pausing must always be one click
+            confirmed(job_id, command)
         if command in ("start", "resume"):
             toolkit.engine.start(job_id)
         elif command == "pause":
