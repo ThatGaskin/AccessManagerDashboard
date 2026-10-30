@@ -5,16 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{CSRF_TOKEN}}">
   <title>Access Manager Toolkit</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%232563eb'/%3E%3Cpath d='M5 7V5a3 3 0 0 1 6 0v2h1v6H4V7zm2 0h2V5a1 1 0 0 0-2 0z' fill='white'/%3E%3C/svg%3E">
+  <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="#/">Access Manager Toolkit</a>
+    <a class="brand" href="#/" aria-label="Access Manager Toolkit — jobs">
+      <img class="brand-mark" src="/static/logo.svg" alt="" width="28" height="28">
+      <span class="brand-name">Access Manager<span class="brand-sub">Toolkit</span></span>
+    </a>
+    <span class="badge b-warn" title="Built from the SailPoint API documentation and tested only against the offline sandbox. Nothing has been verified on a real tenant yet.">experimental</span>
     <nav>
       <a href="#/" data-nav="jobs">Jobs</a>
       <a href="#/new" data-nav="new">New job</a>
-      <a href="#/reports" data-nav="reports">Reports <span class="badge b-warn">experimental</span></a>
+      <a href="#/reports" data-nav="reports">Reports</a>
       <a href="#/connections" data-nav="connections">Connections</a>
       <a href="#/logs" data-nav="logs">Logs</a>
     </nav>

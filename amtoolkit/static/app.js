@@ -202,6 +202,7 @@ async function renderJobs() {
   view.replaceChildren(
     h("div", { class: "row spread" }, h("h1", {}, "Jobs"), h("a", { class: "btn primary", href: "#/new" }, "New bulk job")),
     h("div", { class: "panel" }, jobs.length ? table : h("div", { class: "empty" },
+      h("img", { class: "empty-mark", src: "/static/logo.svg", alt: "" }),
       "No jobs yet. ", h("a", { href: "#/new" }, "Start one from a CSV file"), ".")));
   pollTimer = setInterval(async () => {
     if (location.hash === "#/" || location.hash === "") {
@@ -241,9 +242,10 @@ async function renderNewJob(presetAction) {
     return;
   }
   const opt = (a) => h("option", { value: a.key, selected: a.key === presetAction }, a.title);
+  const tested = META.actions.filter((a) => !a.experimental), untested = META.actions.filter((a) => a.experimental);
   const actionSel = h("select", { name: "action" },
-    h("optgroup", { label: "Tested" }, META.actions.filter((a) => !a.experimental).map(opt)),
-    h("optgroup", { label: "Experimental — not yet tested on a real tenant" }, META.actions.filter((a) => a.experimental).map(opt)));
+    tested.length ? h("optgroup", { label: "Tested" }, tested.map(opt)) : null,
+    untested.length ? h("optgroup", { label: "Experimental — not yet tested on a real tenant" }, untested.map(opt)) : null);
   const connSel = h("select", { name: "connection_id" }, conns.map((c) => h("option", { value: c.id }, `${c.name} (${c.environment})`)));
   const nameIn = h("input", { name: "name", placeholder: "e.g. Finance access profiles – Q4", maxlength: "200" });
   const fileIn = h("input", { type: "file", accept: ".csv,text/csv", hidden: true });

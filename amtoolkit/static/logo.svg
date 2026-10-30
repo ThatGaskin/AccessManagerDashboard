@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Access Manager Toolkit">
+  <defs>
+    <linearGradient id="amt-g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#0ea5e9"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="url(#amt-g)"/>
+  <!-- stacked layers behind the shield: bulk operations -->
+  <path d="M12 22.5 32 14l20 8.5" fill="none" stroke="#fff" stroke-opacity=".35" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- shield with keyhole: access -->
+  <path d="M32 19 47 25v8.5c0 9.6-6.3 16.6-15 19.5-8.7-2.9-15-9.9-15-19.5V25z" fill="#fff"/>
+  <path d="M32 29.5a4.5 4.5 0 0 0-2.4 8.3L28.4 44h7.2l-1.2-6.2a4.5 4.5 0 0 0-2.4-8.3z" fill="url(#amt-g)"/>
+</svg>

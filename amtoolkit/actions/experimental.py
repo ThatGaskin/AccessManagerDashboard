@@ -1,7 +1,7 @@
 """Experimental bulk actions.
 
 Built from the Identity Security Cloud API documentation and tested against the offline sandbox only.
-They use the same safety model as the stable actions: read-only planning, approval bound to the plan,
+They use the same safety model as the other actions: read-only planning, approval bound to the plan,
 pause/resume, audit log, and rollback where an inverse exists. Updates additionally record the value of
 every field before the change and refuse to apply when the object changed after planning.
 """
