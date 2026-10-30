@@ -161,6 +161,25 @@ delimiters and UTF-8 (with or without BOM) / Windows-1252 encodings are accepted
 | `new_group_members` | | Members of those new groups, separated by `;`. Warned when empty. |
 | `new_group_description` | | Description of those new groups. |
 
+## References: validation and lookups
+
+Columns that name something in the tenant (owners, members, sources, entitlements, groups, profiles,
+roles, IDs) are *references*:
+
+* **Any text is accepted.** Only what can never match is rejected before lookups: control characters
+  (line breaks, tabs), values over 255 characters, and non-IDs in ID-only columns. Values listed twice
+  in one cell are warned about.
+* **Misses suggest similar names.** When a value matches nothing exactly, the plan searches for objects
+  whose name *contains* it and says "Did you mean …?" (one extra lookup per distinct missing value).
+* **Few API calls.** Before planning, the references of all rows are looked up together — up to 50
+  values per request with `in (…)` filters — and shared by every row; each distinct value is looked up
+  once per plan, whatever its case or whether it is given as email or ID. If the tenant rejects a
+  batched filter, the toolkit remembers that and falls back to one lookup per value.
+* **Typeahead in the row editor.** Reference fields suggest matching names (contains search, after a
+  short pause in typing; tenants without `co` fall back to starts-with). Approver fields let you pick
+  the approver type first — manager, owner, source owner, app owner or governance group — and then
+  search groups by any part of their name.
+
 ## Ownership and governance groups
 
 * **Owners are people.** In Identity Security Cloud an access profile is owned by exactly one identity.

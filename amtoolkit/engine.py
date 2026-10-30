@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 
-from .actions import ItemFailed, PlanContext, get_action, msg
+from .actions import ItemFailed, PlanContext, get_action, msg, references
 from .connectors import AuthError, ConfigError, ConnectorError, Interrupted
 from .store import EDITABLE_ITEM_STATUSES, Store
 from .util import now_iso
@@ -23,6 +23,11 @@ class JobStateError(Exception):
 
 def plan_item(store: Store, action, ctx: PlanContext, item, options):
     """Plans one row and stores the result. Raises AuthError/ConfigError, which abort the whole plan."""
+    checks = action.check_references(item["input"])
+    if any(m["level"] == "error" for m in checks):
+        # Malformed references (bad email, not an ID…) fail the row before any lookup is sent.
+        store.set_item_plan(item["id"], "error", item["input"].get("name") or "", None, checks)
+        return
     try:
         plan = action.plan(ctx, item["input"], options)
     except (AuthError, ConfigError):
@@ -31,7 +36,15 @@ def plan_item(store: Store, action, ctx: PlanContext, item, options):
         plan_op, plan_messages = "error", [msg("error", f"Lookup failed: {exc}", None, "lookup_failed")]
         store.set_item_plan(item["id"], plan_op, "", None, plan_messages)
         return
-    store.set_item_plan(item["id"], plan.op, plan.target, plan.payload, plan.messages)
+    store.set_item_plan(item["id"], plan.op, plan.target, plan.payload, checks + plan.messages)
+
+
+def prefetch_references(action, ctx, items):
+    """Looks up the references of all rows about to be planned in batches, so planning each row mostly hits
+    the cache. Returns the number of values prefetched."""
+    refs = [ref for item in items if not any(m["level"] == "error" for m in action.check_references(item["input"]))
+            for ref in action.references(item["input"])]
+    return references.prefetch(ctx, refs)
 
 
 def recheck_duplicates(store: Store, action, job_id):
@@ -103,6 +116,10 @@ class Runner(threading.Thread):
         error = None
         done = 0
         try:
+            started = time.monotonic()
+            found = prefetch_references(action, ctx, items)
+            log.info("Job %s: prefetched %d reference(s) for %d row(s) in %.1f s", self.job_id, found, len(items),
+                     time.monotonic() - started)
             for item in items:
                 if self.abort.is_set():
                     break

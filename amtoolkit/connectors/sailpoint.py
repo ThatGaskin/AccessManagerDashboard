@@ -15,6 +15,7 @@ from .http import ApiClient, ClientCredentialsToken
 
 PATCH_HEADERS = {"Content-Type": "application/json-patch+json"}
 PAGE = 250
+CHUNK = 50  # values per batched "in (…)" filter, keeping URLs well below server limits
 
 ID_RE = re.compile(r"^[0-9a-f]{32}$", re.I)
 
@@ -61,6 +62,8 @@ class SailPointISC(Connector):
         self.wg_api = (config.get("workgroups_api") or "beta").strip("/")
         # Versioned endpoints that are still experimental in a given release require this header.
         self.wg_headers = {} if self.wg_api == "beta" else {"X-SailPoint-Experimental": "true"}
+        self._no_contains = set()  # (path, field) pairs where the tenant rejected a "co" filter
+        self._no_bulk = set()  # (kind, field) pairs this tenant rejected in an "in (…)" filter
 
     def _list(self, path, filters, limit=10, headers=None):
         return self.api.request("GET", path, params={"filters": filters, "limit": limit}, headers=headers) or []
@@ -83,14 +86,15 @@ class SailPointISC(Connector):
 
     def search_identities(self, query, limit=20):
         query = query.strip()
-        if ID_RE.match(query) or "@" in query:
+        if ID_RE.match(query):
             return self.find_identities(query)
-        # Run simple filters one by one rather than one OR-filter, so a tenant that rejects one of them
+        # Partial text: "contains" on each field. Run simple filters one by one rather than one OR-filter, so a tenant that rejects one of them
         # (unsupported operator) still returns results from the others.
         found = {}
-        for filters in (f"alias sw {q(query)}", f"firstname sw {q(query)}", f"lastname sw {q(query)}"):
+        fields = ("email", "alias") if "@" in query else ("alias", "firstname", "lastname", "email")
+        for field in fields:
             try:
-                rows = self._list("/v3/public-identities", filters, limit=limit)
+                rows = self._contains("/v3/public-identities", field, query, limit)
             except ConnectorError as exc:
                 if exc.status == 400:
                     continue
@@ -99,6 +103,121 @@ class SailPointISC(Connector):
                 found.setdefault(i["id"], {"id": i["id"], "name": i.get("name"), "email": i.get("email"),
                                            "alias": i.get("alias")})
         return sorted(found.values(), key=lambda i: (i["name"] or "").lower())[:limit]
+
+    def _contains(self, path, field, text, limit, *, scope="", headers=None):
+        """`field co "text"`, or `sw` where the tenant does not support `co` for that field (HTTP 400)."""
+        ops = ["sw"] if (path, field) in self._no_contains else ["co", "sw"]
+        for op in ops:
+            try:
+                return self._list(path, f"{scope}{field} {op} {q(text)}", limit=limit, headers=headers)
+            except ConnectorError as exc:
+                if exc.status != 400 or op == "sw":
+                    raise
+                self._no_contains.add((path, field))
+        return []
+
+    def suggest(self, kind, text, scope=None, limit=10):
+        text = text.strip()
+        if not text:
+            return []
+        if kind == "identity":
+            return [{"value": i.get("email") or i.get("alias") or i["id"],
+                     "label": f"{i.get('name') or i['id']} ({i.get('email') or i.get('alias') or i['id']})"}
+                    for i in self.search_identities(text, limit)]
+        type_ = kind.split(":", 1)[-1]
+        path, headers = self._endpoint(type_)
+        scoped = f"source.id eq {q(scope)} and " if scope and type_ == "entitlement" else ""
+        try:
+            rows = self._contains(path, "name", text, limit, scope=scoped, headers=headers)
+        except ConnectorError as exc:
+            if exc.status == 400:
+                return []
+            raise
+        return [{"value": o.get("name"), "label": o.get("name")} for o in rows if o.get("name")]
+
+    # ---------------------------------------------------------------- batched lookups
+    def _list_in(self, path, field, values, *, scope="", headers=None):
+        """Objects whose `field` is one of `values`, CHUNK values per request. Returns (objects, complete);
+        complete is False when a page was full, i.e. some matches may be missing."""
+        objects, complete = [], True
+        for i in range(0, len(values), CHUNK):
+            chunk = values[i:i + CHUNK]
+            found = self._list(path, f"{scope}{field} in ({','.join(q(v) for v in chunk)})", limit=PAGE,
+                               headers=headers)
+            objects += found
+            complete = complete and len(found) < PAGE
+        return objects, complete
+
+    def _bulk(self, kind, values, path, fields, *, scope="", headers=None, shape=lambda o: o):
+        """Batched lookup by one or more fields. A field the tenant cannot filter with `in` (HTTP 400) is
+        remembered and left to single lookups."""
+        result = {}
+        remaining = list(values)
+        for field in fields:
+            if not remaining or (kind, field) in self._no_bulk:
+                continue
+            try:
+                objects, complete = self._list_in(path, field, remaining, scope=scope, headers=headers)
+            except ConnectorError as exc:
+                if exc.status != 400:
+                    raise
+                self._no_bulk.add((kind, field))
+                continue
+            attr, wanted = field.split(".")[-1], {v.lower() for v in remaining}
+            for o in objects:
+                key = str(o.get(attr) or "").lower()
+                if key in wanted:
+                    result.setdefault(key, []).append(shape(o))
+            if not complete:
+                return result  # some matches may be cut off; the rest is looked up one by one
+            if field == fields[-1]:
+                result.update({v.lower(): [] for v in remaining if v.lower() not in result})
+            remaining = [v for v in remaining if v.lower() not in result]
+        return result
+
+    def find_many(self, kind, values, scope=None):
+        values = [v.strip() for v in values if v and v.strip()]
+        if kind == "identity":
+            shape = lambda i: {"id": i["id"], "name": i.get("name"), "email": i.get("email")}  # noqa: E731
+            path = "/v3/public-identities"
+            ids = [v for v in values if ID_RE.match(v)]
+            emails = [v for v in values if "@" in v and not ID_RE.match(v)]
+            aliases = [v for v in values if v not in ids and v not in emails]
+            out = {}
+            for group, field in ((ids, "id"), (emails, "email"), (aliases, "alias")):
+                if group:
+                    out.update(self._bulk(kind, group, path, [field], shape=shape))
+            return out
+        if kind == "source":
+            return self._bulk(kind, values, "/v3/sources", ["name"], shape=lambda s: {"id": s["id"], "name": s["name"]})
+        if kind == "access_profile":
+            return self._bulk(kind, values, "/v3/access-profiles", ["name"],
+                              shape=lambda p: {"id": p["id"], "name": p["name"],
+                                               "source": (p.get("source") or {}).get("name")})
+        if kind == "governance_group":
+            names = [v for v in values if not ID_RE.match(v) and not re.match(r"^[0-9a-f-]{36}$", v, re.I)]
+            out = self._bulk(kind, names, f"/{self.wg_api}/workgroups", ["name"], headers=self.wg_headers,
+                             shape=self._group)
+            return out
+        if kind == "entitlement":
+            if not scope:
+                return {}
+            return self._bulk(kind, values, f"/{self.ent_api}/entitlements", ["name", "value"],
+                              scope=f"source.id eq {q(scope)} and ",
+                              shape=lambda e: {"id": e["id"], "name": e.get("name"), "value": e.get("value")})
+        if kind.startswith("object:"):
+            type_ = kind.split(":", 1)[1]
+            path, headers = self._endpoint(type_)
+            scoped = f"source.id eq {q(scope)} and " if scope and type_ == "entitlement" else ""
+            shape = lambda o: model.normalize(type_, o)  # noqa: E731
+            ids = [v for v in values if ID_RE.match(v)]
+            names = [v for v in values if not ID_RE.match(v)]
+            out = self._bulk(kind, ids, path, ["id"], scope=scoped, headers=headers, shape=shape) if ids else {}
+            fields = ["name", "value"] if type_ == "entitlement" else ["name"]
+            if names:
+                out.update(self._bulk(kind, names, path, fields, scope=scoped, headers=headers, shape=shape))
+            return out
+        return super().find_many(kind, values, scope)
 
     def find_sources(self, name):
         return [{"id": s["id"], "name": s["name"]} for s in self._list("/v3/sources", f"name eq {q(name)}")]

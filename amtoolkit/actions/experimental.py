@@ -8,9 +8,10 @@ every field before the change and refuse to apply when the object changed after 
 from ..connectors import model
 from ..connectors.base import AuthError, ConfigError, ConnectorError
 from ..util import parse_bool, split_list
-from .access_profiles import (APPROVER_TYPES, NEW_GROUP_COLUMNS, NewGroups, _lookup_one, _resolve_group, _resolve_owner,
-                              ensure_new_groups, groups_note)
+from .access_profiles import (APPROVER_TYPES, NEW_GROUP_COLUMNS, NewGroups, SchemeReferences, _lookup_one,
+                              _resolve_group, _resolve_owner, ensure_new_groups, groups_note)
 from .base import Action, Column, ItemFailed, Outcome, Plan, msg
+from .references import check_value
 
 CLEAR = "(clear)"
 # Approver token for a governance group the row creates; replaced by the real ID when the row runs.
@@ -41,7 +42,7 @@ def _resolve_identity(ctx, ref, field_name, label, m):
 
 def _identity_name(ctx, identity_id):
     try:
-        found = ctx.cached(("identity", identity_id), lambda: ctx.connector.find_identities(identity_id))
+        found = ctx.cached(("identity", identity_id.lower()), lambda: ctx.connector.find_identities(identity_id))
     except ConnectorError:
         found = []
     return found[0].get("name") or identity_id if found else identity_id
@@ -176,22 +177,24 @@ class ObjectUpdateAction(ExperimentalAction):
 
 
 # ---------------------------------------------------------------------------- access profiles
-class UpdateAccessProfiles(ObjectUpdateAction):
+class UpdateAccessProfiles(SchemeReferences, ObjectUpdateAction):
     key = "access_profile.update"
     title = "Update access profiles"
     description = ("Changes description, owner, requestable/enabled flags, approvers and entitlements of existing "
                    "access profiles. Blank cells leave a field unchanged; the plan shows every before → after.")
     columns = [
-        Column("access_profile", True, "Access profile name or ID.", "Finance - Read"),
+        Column("access_profile", True, "Access profile name or ID.", "Finance - Read", ref="object:access_profile"),
         Column("description", False, f"New description. {CLEAR} empties it.", "Read access to finance shares"),
-        Column("owner", False, "New owner: a person (email, username or ID).", "carol@example.com"),
+        Column("owner", False, "New owner: a person (email, username or ID).", "carol@example.com", ref="identity"),
         Column("requestable", False, "yes/no", ""),
         Column("enabled", False, "yes/no", ""),
         Column("approval_schemes", False, "Replaces all approvers: manager;owner;governance_group:<name>… or none.",
-               "manager;governance_group:Finance Approvers"),
-        Column("add_entitlements", False, "Entitlements on the profile's source to add, separated by ';'.", ""),
-        Column("remove_entitlements", False, "Entitlements to remove, separated by ';'.", ""),
-        *[Column(c.name, False, c.help, "") for c in NEW_GROUP_COLUMNS],
+               "manager;governance_group:Finance Approvers", ref="approver", multi=True),
+        Column("add_entitlements", False, "Entitlements on the profile's source to add, separated by ';'.", "",
+               ref="object:entitlement", multi=True),
+        Column("remove_entitlements", False, "Entitlements to remove, separated by ';'.", "",
+               ref="object:entitlement", multi=True),
+        *[Column(c.name, False, c.help, "", ref=c.ref, multi=c.multi) for c in NEW_GROUP_COLUMNS],
     ]
 
     def duplicate_key(self, row):
@@ -259,15 +262,32 @@ class ReassignOwnership(ObjectUpdateAction):
     columns = [
         Column("object_type", True, "access_profile, role, entitlement, source or governance_group.", "access_profile"),
         Column("object", True, "Name or ID of the object.", "Finance - Read"),
-        Column("source", False, "Source name — only needed for entitlements given by name.", ""),
-        Column("new_owner", True, "New owner: a person (email, username or ID).", "carol@example.com"),
+        Column("source", False, "Source name — only needed for entitlements given by name.", "", ref="source"),
+        Column("new_owner", True, "New owner: a person (email, username or ID).", "carol@example.com",
+               ref="identity"),
         Column("current_owner", False, "Optional safety check: the row fails if the object is not currently owned "
-               "by this person.", "alice@example.com"),
+               "by this person.", "alice@example.com", ref="identity"),
     ]
 
     def duplicate_key(self, row):
         return f"{model.parse_type(row.get('object_type'))}:{(row.get('object') or '').lower()}" \
             if row.get("object") else None
+
+    def check_references(self, row):
+        out = super().check_references(row)
+        type_ = model.parse_type(row.get("object_type"))
+        if type_ and row.get("object"):
+            problem = check_value(f"object:{type_}", row["object"], "object")
+            if problem:
+                out.append(problem)
+        return out
+
+    def references(self, row):
+        yield from super().references(row)
+        type_ = model.parse_type(row.get("object_type"))
+        if type_ and row.get("object"):
+            scope = row.get("source") if type_ == "entitlement" and row.get("source") else None
+            yield f"object:{type_}", row["object"], scope
 
     def resolve(self, ctx, row, m):
         type_ = model.parse_type(row.get("object_type"))
@@ -312,10 +332,10 @@ class UpdateEntitlements(ObjectUpdateAction):
     description = ("Fills in or corrects entitlement metadata: description, owner, privileged and requestable "
                    "flags. Use the 'Entitlements missing description or owner' report to build the CSV.")
     columns = [
-        Column("source", True, "Source name.", "Active Directory"),
-        Column("entitlement", True, "Entitlement name, value or ID.", "Finance-Write"),
+        Column("source", True, "Source name.", "Active Directory", ref="source"),
+        Column("entitlement", True, "Entitlement name, value or ID.", "Finance-Write", ref="object:entitlement"),
         Column("description", False, f"New description. {CLEAR} empties it.", "Write access to finance shares"),
-        Column("owner", False, "New owner: a person (email, username or ID).", "alice@example.com"),
+        Column("owner", False, "New owner: a person (email, username or ID).", "alice@example.com", ref="identity"),
         Column("privileged", False, "yes/no", ""),
         Column("requestable", False, "yes/no", ""),
     ]
@@ -373,9 +393,10 @@ class ChangeGroupMembers(ExperimentalAction):
                    "or to sync a team list. Only real changes are planned.")
     inverse = "governance_group.members"
     columns = [
-        Column("group", True, "Governance group name or ID.", "Finance Approvers"),
-        Column("add", False, "Identities to add (email, username or ID), separated by ';'.", "bob@example.com"),
-        Column("remove", False, "Identities to remove, separated by ';'.", "carol"),
+        Column("group", True, "Governance group name or ID.", "Finance Approvers", ref="governance_group"),
+        Column("add", False, "Identities to add (email, username or ID), separated by ';'.", "bob@example.com",
+               ref="identity", multi=True),
+        Column("remove", False, "Identities to remove, separated by ';'.", "carol", ref="identity", multi=True),
     ]
 
     def duplicate_key(self, row):
@@ -459,14 +480,20 @@ class CreateRoles(ExperimentalAction):
     columns = [
         Column("name", True, "Unique role name.", "Finance Analyst"),
         Column("description", False, "", "Everything a finance analyst needs"),
-        Column("owner", True, "Owner: a person (email, username or ID).", "alice@example.com"),
-        Column("access_profiles", True, "Access profile names or IDs, separated by ';'.", "Finance - Read;Remote Access"),
+        Column("owner", True, "Owner: a person (email, username or ID).", "alice@example.com", ref="identity"),
+        Column("access_profiles", True, "Access profile names or IDs, separated by ';'.", "Finance - Read;Remote Access",
+               ref="object:access_profile", multi=True),
         Column("requestable", False, "yes/no — default no.", "no"),
         Column("enabled", False, "yes/no — default yes.", "yes"),
     ]
 
     def duplicate_key(self, row):
         return (row.get("name") or "").lower() or None
+
+    def references(self, row):
+        yield from super().references(row)
+        if row.get("name"):
+            yield "object:role", row["name"], None  # the "already exists" check
 
     def plan(self, ctx, row, options):
         m = []
@@ -493,7 +520,7 @@ class CreateRoles(ExperimentalAction):
             except ValueError as exc:
                 m.append(msg("error", str(exc), key, "invalid"))
         if name:
-            existing = ctx.connector.find_objects("role", name)
+            existing = ctx.cached((("object", "role", None), name.lower()), lambda: ctx.connector.find_objects("role", name))
             if existing:
                 m.append(msg("info", f"Already exists ({existing[0]['id']}); this row will be skipped", "name", "exists"))
                 return Plan("skip", name, None, m)
@@ -535,16 +562,21 @@ class DeleteRoles(ExperimentalAction):
     key = "role.delete"
     title = "Delete roles"
     description = "Deletes roles by ID (preferred) or exact name. Used for rollback of 'Create roles'."
-    columns = [Column("id", False, "Role ID.", ""), Column("name", False, "Exact role name.", "Finance Analyst")]
+    columns = [Column("id", False, "Role ID.", "", ref="id"),
+               Column("name", False, "Exact role name.", "Finance Analyst", ref="object:role")]
 
     def duplicate_key(self, row):
         return (row.get("id") or row.get("name") or "").lower() or None
+
+    def references(self, row):
+        if not row.get("id"):
+            yield from super().references(row)
 
     def plan(self, ctx, row, options):
         ref = row.get("id") or row.get("name")
         if not ref:
             return Plan("error", "", None, [msg("error", "Either id or name is required", "id", "required")])
-        found = ctx.connector.find_objects("role", ref)
+        found = ctx.cached((("object", "role", None), ref.lower()), lambda: ctx.connector.find_objects("role", ref))
         if len(found) > 1:
             return Plan("error", ref, None, [msg("error", f"'{ref}' matches {len(found)} roles; use the ID", "name",
                                                  "ambiguous")])
@@ -577,10 +609,10 @@ class SubmitAccessRequests(ExperimentalAction):
                    "submits the opposite request.")
     inverse = "access_request.submit"
     columns = [
-        Column("requested_for", True, "Identity (email, username or ID).", "bob@example.com"),
+        Column("requested_for", True, "Identity (email, username or ID).", "bob@example.com", ref="identity"),
         Column("access_type", True, "access_profile, role or entitlement.", "access_profile"),
         Column("access", True, "Name or ID of the access profile / role / entitlement.", "Finance - Read"),
-        Column("source", False, "Source name — only for entitlements given by name.", ""),
+        Column("source", False, "Source name — only for entitlements given by name.", "", ref="source"),
         Column("request_type", False, "grant (default) or revoke.", "grant"),
         Column("comment", True, "Business justification, shown to approvers.", "Joining the Q4 finance project"),
     ]
@@ -588,6 +620,22 @@ class SubmitAccessRequests(ExperimentalAction):
     def duplicate_key(self, row):
         return f"{(row.get('requested_for') or '').lower()}|{(row.get('access') or '').lower()}" \
             if row.get("access") else None
+
+    def check_references(self, row):
+        out = super().check_references(row)
+        type_ = model.parse_type(row.get("access_type"))
+        if type_ and row.get("access"):
+            problem = check_value(f"object:{type_}", row["access"], "access")
+            if problem:
+                out.append(problem)
+        return out
+
+    def references(self, row):
+        yield from super().references(row)
+        type_ = model.parse_type(row.get("access_type"))
+        if type_ and row.get("access"):
+            scope = row.get("source") if type_ == "entitlement" and row.get("source") else None
+            yield f"object:{type_}", row["access"], scope
 
     def plan(self, ctx, row, options):
         m = []
@@ -668,7 +716,7 @@ class CancelAccessRequests(ExperimentalAction):
     title = "Cancel access requests"
     description = "Cancels pending access requests, e.g. stale ones or ones submitted by mistake."
     columns = [
-        Column("request_id", True, "Access request ID.", ""),
+        Column("request_id", True, "Access request ID.", "", ref="id"),
         Column("comment", True, "Reason for cancelling.", "Submitted by mistake"),
     ]
 
@@ -714,8 +762,9 @@ class ForwardApprovals(ExperimentalAction):
                    "leave or has left. Rollback forwards them back.")
     inverse = "approval.forward"
     columns = [
-        Column("approval_id", True, "Pending approval ID.", ""),
-        Column("new_approver", True, "Person to forward to (email, username or ID).", "alice@example.com"),
+        Column("approval_id", True, "Pending approval ID.", "", ref="id"),
+        Column("new_approver", True, "Person to forward to (email, username or ID).", "alice@example.com",
+               ref="identity"),
         Column("comment", True, "Reason, visible in the approval history.", "Bob is on leave"),
     ]
 

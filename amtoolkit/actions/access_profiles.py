@@ -23,15 +23,19 @@ MAX_GROUP_NAME = 128
 NEW_GROUP_COLUMNS = [
     Column("new_group_owner", False, "Fill in to create governance groups named in approval_schemes that do not "
            "exist yet: the owner of the new groups (email, username or identity ID). Blank = a missing group is "
-           "flagged as an error.", "alice@example.com"),
+           "flagged as an error.", "alice@example.com", ref="identity"),
     Column("new_group_members", False, "Members of the new groups (email, alias or ID), separated by ';'. A group "
-           "without members cannot approve anything.", "alice@example.com;carol"),
+           "without members cannot approve anything.", "alice@example.com;carol", ref="identity", multi=True),
     Column("new_group_description", False, "Description of the new groups.", "Approves access to finance systems"),
 ]
 
 
 def _lookup_one(ctx, kind, key, fn, field_name, label, messages, shown=None):
     """Resolves a reference; adds an error message for zero or multiple matches."""
+    if kind == "identity":
+        # Emails and usernames are case-insensitive; one cache entry per person however they are written.
+        shown = key if shown is None else shown
+        key = key.strip().lower()
     try:
         found = ctx.cached((kind, key), fn)
     except (AuthError, ConfigError):
@@ -43,17 +47,45 @@ def _lookup_one(ctx, kind, key, fn, field_name, label, messages, shown=None):
     shown = key if shown is None else shown
     if not found:
         hint = " (the identity may have been deleted)" if kind == "identity" and re.fullmatch(r"[0-9a-f]{32}", str(shown)) \
-            else ""
+            else did_you_mean(ctx, kind, key, shown)
         messages.append(msg("error", f"{label} '{shown}' was not found{hint}", field_name, "not_found"))
         return None
     if len(found) > 1:
         messages.append(msg("error", f"{label} '{shown}' matches {len(found)} records; use the ID instead",
                             field_name, "ambiguous"))
         return None
+    if kind == "identity" and found[0].get("id"):
+        # The same person given by ID elsewhere in the file needs no second lookup.
+        ctx.remember(("identity", found[0]["id"].lower()), found)
     return found[0]
 
 
-class CreateAccessProfiles(Action):
+def scheme_groups(text):
+    """Group names/IDs referenced as governance_group:<x> in an approval_schemes cell."""
+    return [part.split(":", 1)[1].strip() for part in split_list(text)
+            if part.lower().replace(" ", "_").startswith("governance_group:")]
+
+
+class SchemeReferences:
+    """Validation and batched lookups for the governance groups named in approval_schemes."""
+
+    def check_references(self, row):
+        from .references import check_group_name
+        out = super().check_references(row)
+        for name in scheme_groups(row.get("approval_schemes")):
+            problem = check_group_name(name, "approval_schemes")
+            if problem:
+                out.append(problem)
+        return out
+
+    def references(self, row):
+        yield from super().references(row)
+        for name in scheme_groups(row.get("approval_schemes")):
+            if name:
+                yield "governance_group", name, None
+
+
+class CreateAccessProfiles(SchemeReferences, Action):
     key = "access_profile.create"
     title = "Create access profiles"
     description = ("Creates one access profile per row. Owner, source and entitlements are looked up by "
@@ -64,15 +96,17 @@ class CreateAccessProfiles(Action):
         Column("description", False, "Shown to requesters in the access request UI.",
                "Read access to finance shares"),
         Column("owner", True, "Owner identity: email, username (alias) or identity ID. Must be a person — "
-               "governance groups cannot own access profiles (use them as approvers).", "alice@example.com"),
-        Column("source", True, "Source name exactly as it appears in the tenant.", "Active Directory"),
+               "governance groups cannot own access profiles (use them as approvers).", "alice@example.com",
+               ref="identity"),
+        Column("source", True, "Source name exactly as it appears in the tenant.", "Active Directory", ref="source"),
         Column("entitlements", True, "Entitlement names or values on that source, separated by ';'.",
-               "Finance-Read;VPN Users"),
+               "Finance-Read;VPN Users", ref="entitlement", multi=True),
         Column("requestable", False, "yes/no — can users request it? Default yes.", "yes"),
         Column("enabled", False, "yes/no — default yes.", "yes"),
         Column("approval_schemes", False,
                "Approvers in order, separated by ';': manager, owner, source_owner, app_owner, "
-               "governance_group:<group name or ID>. Blank = no approval.", "manager;governance_group:Finance Approvers"),
+               "governance_group:<group name or ID>. Blank = no approval.", "manager;governance_group:Finance Approvers",
+               ref="approver", multi=True),
         Column("comments_required", False, "yes/no — requester must comment. Default no.", "no"),
         Column("denial_comments_required", False, "yes/no — approver must comment on denial. Default no.", "no"),
         *NEW_GROUP_COLUMNS,
@@ -84,6 +118,11 @@ class CreateAccessProfiles(Action):
 
     def duplicate_key(self, row):
         return (row.get("name") or "").strip().lower() or None
+
+    def references(self, row):
+        yield from super().references(row)
+        if row.get("name"):
+            yield "access_profile", row["name"], None  # the "already exists" check
 
     def plan(self, ctx, row, options):
         m = []
@@ -261,7 +300,8 @@ def _resolve_group(ctx, ref, m, field_name="approval_schemes", new_groups=None):
             return new_groups.plan(ref, field_name)
         hint = " Fill in new_group_owner (and new_group_members) to create it with this row," \
             if new_groups is not None else ""
-        m.append(msg("error", f"Governance group '{ref}' does not exist.{hint} Create it first — use "
+        similar = did_you_mean(ctx, "governance_group", ref.lower(), ref)
+        m.append(msg("error", f"Governance group '{ref}' does not exist{similar or '.'}{hint} Create it first — use "
                               f"\"Create missing governance groups\" on this job — or correct the name.",
                      field_name, "gg_missing", value=ref))
         return None
@@ -276,6 +316,28 @@ def _resolve_group(ctx, ref, m, field_name="approval_schemes", new_groups=None):
     else:
         m.append(msg("info", f"Approver group '{group['name']}' ({group['id']})", field_name))
     return group
+
+
+def did_you_mean(ctx, kind, key, shown):
+    """For a reference that matched nothing exactly: up to 5 objects whose name contains it. Costs one
+    lookup per distinct missing value, and only for misses."""
+    if isinstance(kind, tuple):  # ("object", type, source_id)
+        ref_kind, scope = f"object:{kind[1]}", kind[2]
+    elif kind == "entitlement":
+        ref_kind, scope = "entitlement", key[0]
+    else:
+        ref_kind, scope = kind, None
+    text = str(shown).strip()
+    if len(text) < 2 or re.fullmatch(r"[0-9a-f]{32}", text):
+        return ""
+    try:
+        found = ctx.cached(("suggest", ref_kind, scope, text.lower()),
+                           lambda: ctx.connector.suggest(ref_kind, text, scope, 5))
+    except (AuthError, ConfigError):
+        raise
+    except ConnectorError:
+        return ""
+    return f". Did you mean: {', '.join(repr(s['value']) for s in found[:5])}?" if found else ""
 
 
 class NewGroups:
@@ -423,12 +485,18 @@ class DeleteAccessProfiles(Action):
     description = ("Deletes access profiles by ID (preferred) or exact name. Used for rollback of a create job. "
                    "Profiles still used by roles cannot be deleted and are reported as failures.")
     columns = [
-        Column("id", False, "Access profile ID. Takes precedence over name.", "2c9180857d0a6b0e017d0b3e5f1a0042"),
-        Column("name", False, "Exact access profile name (used when id is blank).", "Finance - Read"),
+        Column("id", False, "Access profile ID. Takes precedence over name.", "2c9180857d0a6b0e017d0b3e5f1a0042",
+               ref="id"),
+        Column("name", False, "Exact access profile name (used when id is blank).", "Finance - Read",
+               ref="access_profile"),
     ]
 
     def duplicate_key(self, row):
         return (row.get("id") or row.get("name") or "").strip().lower() or None
+
+    def references(self, row):
+        if not row.get("id"):
+            yield from super().references(row)
 
     def plan(self, ctx, row, options):
         c = ctx.connector
@@ -443,7 +511,7 @@ class DeleteAccessProfiles(Action):
                 if profile and name and profile["name"] != name:
                     m.append(msg("warning", f"ID belongs to '{profile['name']}', not '{name}'", "name"))
             else:
-                matches = c.find_access_profiles(name)
+                matches = ctx.cached(("access_profile", name.lower()), lambda: c.find_access_profiles(name))
                 if len(matches) > 1:
                     return Plan("error", name, None, [msg("error", f"'{name}' matches {len(matches)} profiles; "
                                                                    "use the ID", "name", "ambiguous")])

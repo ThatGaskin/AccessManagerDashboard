@@ -126,9 +126,23 @@ class MockTenant(Connector):
         v = query.strip().lower()
         with _lock:
             rows = [i for i in self._state()["identities"]
-                    if v in i["name"].lower() or i["alias"].lower().startswith(v) or i["email"].lower().startswith(v)
+                    if v in i["name"].lower() or v in i["alias"].lower() or v in i["email"].lower()
                     or i["id"].lower() == v]
         return [{"id": i["id"], "name": i["name"], "email": i["email"], "alias": i["alias"]} for i in rows[:limit]]
+
+    def suggest(self, kind, text, scope=None, limit=10):
+        v = text.strip().lower()
+        if kind == "identity":
+            return [{"value": i["email"] or i["alias"], "label": f"{i['name']} ({i['email'] or i['alias']})"}
+                    for i in self.search_identities(text, limit)]
+        self._delay()
+        type_ = kind.split(":", 1)[-1]
+        with _lock:
+            objs = self._state()[COLLECTIONS[type_]]
+        if type_ == "entitlement" and scope:
+            objs = [o for o in objs if o.get("source_id") == scope]
+        found = [o for o in objs if v in (o.get("name") or "").lower() or v in (o.get("value") or "").lower()]
+        return [{"value": o["name"], "label": o["name"]} for o in found[:limit]]
 
     def find_sources(self, name):
         self._delay()

@@ -17,7 +17,8 @@ def test_job_events_requests_and_connector_calls_are_logged(client, toolkit, san
         entries = logs.memory.since(start)
         text = [f"{e['logger']} {e['message']}" for e in entries]
         assert any(t.startswith(f"amtoolkit.audit job {job_id} [plan_finished]") for t in text)
-        assert any("find_identities(" in t and "result(s)" in t for t in text)
+        assert any("find_many('identity'" in t for t in text)
+        assert any("prefetched" in t for t in text)
         assert any(t.startswith("amtoolkit.app POST /api/connections/") and "-> 200" in t for t in text)
         assert all(e["level"] in ("WARNING", "ERROR") for e in logs.memory.since(start, level="WARNING"))
 

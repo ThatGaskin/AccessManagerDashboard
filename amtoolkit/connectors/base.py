@@ -79,6 +79,26 @@ class Connector:
     def get_access_profile(self, profile_id: str):
         raise NotImplementedError
 
+    def suggest(self, kind: str, text: str, scope: str = None, limit: int = 10) -> list:
+        """Objects whose name (identities: name, username or email) *contains* `text`, for typeahead and
+        "did you mean" hints: [{"value": what to put in the CSV cell, "label": what to show}]. Same kinds as
+        find_many. Connectors without search return []."""
+        return []
+
+    def find_many(self, kind: str, values: list, scope: str = None) -> dict:
+        """Bulk form of the find_* lookups: {value.lower(): matches}, for planning many rows at once.
+        kind: identity, source, access_profile, governance_group, entitlement (scope = source ID) or
+        object:<type> (scope = source ID for entitlements). Values missing from the result were not looked
+        up and are resolved one by one later. This default makes one call per value; connectors that can
+        ask for many values in one request override it."""
+        single = {"identity": self.find_identities, "source": self.find_sources,
+                  "access_profile": self.find_access_profiles, "governance_group": self.find_governance_groups,
+                  "entitlement": lambda v: self.find_entitlements(scope, v)}
+        if kind.startswith("object:"):
+            type_ = kind.split(":", 1)[1]
+            return {v.lower(): self.find_objects(type_, v, scope) for v in values}
+        return {v.lower(): single[kind](v) for v in values}
+
     def find_governance_groups(self, ref: str) -> list:
         """Governance groups (ISC "workgroups") by ID or exact name."""
         raise NotImplementedError

@@ -21,9 +21,9 @@ class CreateGovernanceGroups(Action):
         Column("name", True, f"Unique group name (max {MAX_NAME} characters).", "Finance Approvers"),
         Column("description", False, "What the group approves or reviews.", "Approves access to finance systems"),
         Column("owner", True, "Owner identity: email, username (alias) or identity ID. Must be a person.",
-               "alice@example.com"),
+               "alice@example.com", ref="identity"),
         Column("members", False, "Member identities (email, alias or ID), separated by ';'. A group without "
-               "members cannot approve anything.", "alice@example.com;carol"),
+               "members cannot approve anything.", "alice@example.com;carol", ref="identity", multi=True),
     ]
     options = [
         Option("if_exists", "If a group with the same name already exists", "skip", ["skip", "error"],
@@ -32,6 +32,11 @@ class CreateGovernanceGroups(Action):
 
     def duplicate_key(self, row):
         return (row.get("name") or "").strip().lower() or None
+
+    def references(self, row):
+        yield from super().references(row)
+        if row.get("name"):
+            yield "governance_group", row["name"], None  # the "already exists" check
 
     def plan(self, ctx, row, options):
         c = ctx.connector
@@ -127,19 +132,25 @@ class DeleteGovernanceGroups(Action):
     description = ("Deletes governance groups by ID (preferred) or exact name. Used for rollback. Groups still "
                    "used as approvers may be rejected by the API and are reported as failures.")
     columns = [
-        Column("id", False, "Governance group ID. Takes precedence over name.", "2c9180867a4e5b2a017a4f1d2b3c0001"),
-        Column("name", False, "Exact group name (used when id is blank).", "Finance Approvers"),
+        Column("id", False, "Governance group ID. Takes precedence over name.", "2c9180867a4e5b2a017a4f1d2b3c0001",
+               ref="id"),
+        Column("name", False, "Exact group name (used when id is blank).", "Finance Approvers",
+               ref="governance_group"),
     ]
 
     def duplicate_key(self, row):
         return (row.get("id") or row.get("name") or "").strip().lower() or None
+
+    def references(self, row):
+        if not row.get("id"):
+            yield from super().references(row)
 
     def plan(self, ctx, row, options):
         ref = row.get("id") or row.get("name")
         if not ref:
             return Plan("error", "", None, [msg("error", "Either id or name is required", "id", "required")])
         try:
-            found = ctx.connector.find_governance_groups(ref)
+            found = ctx.cached(("governance_group", ref.lower()), lambda: ctx.connector.find_governance_groups(ref))
         except (AuthError, ConfigError):
             raise
         except ConnectorError as exc:

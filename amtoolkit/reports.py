@@ -22,7 +22,7 @@ class Param:
     label: str
     required: bool = False
     help: str = ""
-    kind: str = "text"  # "identity" renders a search-and-select picker
+    kind: str = "text"  # "identity" renders a search-and-select picker; "approvers" an approver builder
 
 
 @dataclass
@@ -118,7 +118,8 @@ REPORTS = {r.key: r for r in (
            BASE + ["source"], scan_ap_no_approval,
            followup_action="access_profile.update",
            followup_row=lambda r: {"access_profile": r["id"], "approval_schemes": ""},
-           fill=[Param("approval_schemes", "Approvers for all rows", help="e.g. manager or manager;governance_group:Finance Approvers")]),
+           fill=[Param("approval_schemes", "Approvers for all rows", help="e.g. manager or manager;governance_group:Finance Approvers",
+                       kind="approvers")]),
     Report("owned_by", "Objects owned by an identity",
            "Everything a person owns — e.g. before they leave. Export to 'Reassign ownership' and fill in new owners.",
            BASE + ["source"], scan_owned_by,

@@ -29,6 +29,8 @@ log = logging.getLogger(__name__)
 # Read through importlib.resources so the UI also loads when the package runs from a .pyz zip file.
 STATIC = resources.files(__package__) / "static"
 LOOPBACK = {"127.0.0.1", "localhost", "[::1]"}
+SEARCH_KINDS = {"identity", "source", "access_profile", "governance_group", "entitlement", "object:access_profile",
+                "object:role", "object:entitlement", "object:governance_group", "object:source"}
 
 
 def create_app(data_dir, *, allowed_hosts=None):
@@ -188,6 +190,24 @@ def create_app(data_dir, *, allowed_hosts=None):
         if len(query) < 2:
             return jsonify([])
         return jsonify(toolkit.connections.build(conn_id).search_identities(query[:100]))
+
+    @app.get("/api/connections/<conn_id>/search")
+    def search_references(conn_id):
+        """Typeahead for reference cells: objects of one kind whose name contains the typed text."""
+        kind = request.args.get("kind", "")
+        query = request.args.get("q", "").strip()[:100]
+        if kind not in SEARCH_KINDS:
+            abort(400, "Unknown kind")
+        if len(query) < 2:
+            return jsonify([])
+        connector = toolkit.connections.build(conn_id)
+        scope = None
+        if kind in ("entitlement", "object:entitlement") and request.args.get("scope"):
+            sources = connector.find_sources(request.args["scope"].strip()[:255])
+            if len(sources) != 1:
+                return jsonify([])
+            scope = sources[0]["id"]
+        return jsonify(connector.suggest(kind, query, scope, 10))
 
     @app.post("/api/connections/<conn_id>/test")
     def test_connection(conn_id):

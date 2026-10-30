@@ -7,6 +7,8 @@
 """
 from dataclasses import dataclass, field
 
+from ..util import split_list
+
 
 @dataclass
 class Column:
@@ -14,9 +16,14 @@ class Column:
     required: bool = False
     help: str = ""
     example: str = ""
+    # What the cell refers to in the target system (see references.LABELS): validated locally before
+    # planning and looked up in batches. multi = several values separated by ';'.
+    ref: str = None
+    multi: bool = False
 
     def to_dict(self):
-        return {"name": self.name, "required": self.required, "help": self.help, "example": self.example}
+        return {"name": self.name, "required": self.required, "help": self.help, "example": self.example,
+                "ref": self.ref, "multi": self.multi}
 
 
 @dataclass
@@ -75,6 +82,15 @@ class PlanContext:
             self._cache[key] = fn()
         return self._cache[key]
 
+    def has(self, key):
+        return key in self._cache
+
+    def peek(self, key):
+        return self._cache.get(key)
+
+    def remember(self, key, value):
+        self._cache.setdefault(key, value)
+
 
 class Action:
     key = ""
@@ -117,6 +133,27 @@ class Action:
     def duplicate_key(self, row):
         """Rows sharing the same key in one job are flagged as duplicates."""
         return None
+
+    def check_references(self, row) -> list:
+        """Local format checks of the row's reference columns; no API calls. Errors stop the row before any
+        lookup is made."""
+        from .references import check_row
+        return check_row(self.columns, row)
+
+    def references(self, row):
+        """(kind, value, scope) of every object the row refers to, for batched lookups before planning.
+        scope is a source name for entitlements. Actions add references the columns cannot describe."""
+        for col in self.columns:
+            if not col.ref or col.ref in ("id", "approver") or not row.get(col.name):
+                continue
+            scope = None
+            if col.ref in ("entitlement", "object:entitlement"):
+                # Entitlements are looked up within the row's source; without one they are resolved per row.
+                scope = row.get("source")
+                if not scope:
+                    continue
+            for value in (split_list(row[col.name]) if col.multi else [row[col.name]]):
+                yield col.ref, value, scope
 
     def plan(self, ctx: PlanContext, row: dict, options: dict) -> Plan:
         raise NotImplementedError

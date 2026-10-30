@@ -39,8 +39,8 @@ input, select, textarea { font: inherit; color: var(--text); background: var(--b
 input:disabled, textarea:disabled { opacity: .7; }
 input[type=checkbox] { width: auto; }
 label.field { display: block; margin-bottom: 10px; }
-label.field > span { display: block; font-weight: 600; margin-bottom: 3px; }
-label.field .help { font-weight: 400; color: var(--muted); font-size: 12px; }
+label.field > span, .item-field > span { display: block; font-weight: 600; margin-bottom: 3px; }
+label.field .help, .item-field .help { font-weight: 400; color: var(--muted); font-size: 12px; }
 .field.has-error input, .field.has-error textarea { border-color: var(--err); }
 .field.changed input, .field.changed textarea { border-left: 3px solid var(--warn); }
 table { width: 100%; border-collapse: collapse; }
@@ -109,3 +109,7 @@ div.field { margin-bottom: 10px; }
 .log .nowrap { white-space: nowrap; }
 .log tr.lvl-warning td { color: var(--warn); }
 .log tr.lvl-error td { color: var(--err); }
+.approver-add { margin-top: 6px; gap: 6px; flex-wrap: wrap; align-items: flex-start; }
+.approver-add select { width: auto; flex: 0 1 auto; }
+.approver-add .picker { flex: 1 1 200px; }
+[hidden] { display: none !important; }

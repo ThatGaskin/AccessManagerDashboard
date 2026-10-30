@@ -268,7 +268,7 @@ async function renderNewJob(presetAction) {
       h("h2", {}, action.title, action.experimental ? experimentalBadge() : null), h("p", { class: "muted" }, action.description),
       action.experimental ? experimentalBanner() : null,
       h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Column"), h("th", {}, "Description"), h("th", {}, "Example"))),
-        h("tbody", {}, action.columns.map((c) => h("tr", {}, h("td", { class: "mono" }, c.name, c.required ? " *" : ""), h("td", { class: "small" }, c.help), h("td", { class: "mono" }, c.example))))),
+        h("tbody", {}, action.columns.map((c) => h("tr", {}, h("td", { class: "mono" }, c.name, c.required ? " *" : ""), h("td", { class: "small" }, c.help, c.ref && c.ref !== "id" ? h("div", { class: "muted" }, `Looked up: ${REF_LABELS[c.ref] || c.ref}${c.multi ? " (several, ';')" : ""} — any text; misses suggest similar names`) : null), h("td", { class: "mono" }, c.example))))),
       h("p", {}, h("a", { class: "btn", href: `/api/actions/${action.key}/template.csv` }, "Download CSV template")),
       ACTION_NOTES[action.key] ? h("div", { class: "banner info" }, h("strong", {}, "Owners and governance groups"),
         h("ul", { class: "notes" }, ACTION_NOTES[action.key].map((t) => h("li", {}, t)))) : null);
@@ -604,9 +604,16 @@ async function itemDialog(jobId, itemId, state, onChange) {
       const multiline = col.name === "description" || col.name === "entitlements";
       inputs[col.name] = multiline ? h("textarea", { rows: 2, disabled: !editable }, value) : h("input", { value, disabled: !editable });
       const errs = byField[col.name] || [];
-      return h("label", { class: "field" + (errs.some((m) => m.level === "error") ? " has-error" : "") + (value !== orig ? " changed" : "") },
+      const connId = state.job.connection.id;
+      let control = inputs[col.name];
+      if (editable && col.ref === "approver") control = approverBuilder(control, connId);
+      else if (editable && col.ref && col.ref !== "id") {
+        control = refSuggest(control, col.ref, col.multi, connId,
+          ["entitlement", "object:entitlement"].includes(col.ref) ? () => (inputs.source ? inputs.source.value.trim() : "") : null);
+      }
+      return h("div", { class: "field item-field" + (errs.some((m) => m.level === "error") ? " has-error" : "") + (value !== orig ? " changed" : "") },
         h("span", {}, col.name, col.required ? " *" : "", h("div", { class: "help" }, col.help)),
-        inputs[col.name],
+        control,
         value !== orig ? h("div", { class: "small muted" }, "CSV value: ", h("span", { class: "diff-from" }, orig || "∅")) : null,
         h("ul", { class: "msgs" }, errs.map((m) => h("li", { class: m.level }, m.text))));
     });
@@ -711,6 +718,97 @@ function plainInput(placeholder) {
   return { el, get value() { return el.value.trim(); } };
 }
 
+const REF_LABELS = { identity: "identity", source: "source", access_profile: "access profile", entitlement: "entitlement on the row's source",
+  governance_group: "governance group", approver: "approver type or governance group", "object:access_profile": "access profile",
+  "object:role": "role", "object:entitlement": "entitlement", "object:governance_group": "governance group", "object:source": "source" };
+
+// Typeahead for reference cells. Any text is accepted; once typing pauses, objects whose name *contains*
+// the text are offered. In multi-value cells only the part after the last ';' is searched and replaced.
+function refSuggest(input, kind, multi, connectionId, scope) {
+  const list = h("ul", { class: "picker-list", role: "listbox" });
+  list.hidden = true;
+  let timer = null;
+  let seq = 0;
+  const current = () => (multi ? input.value.split(";").pop() : input.value).trim();
+  const put = (value) => {
+    if (multi) {
+      const parts = input.value.split(";");
+      parts[parts.length - 1] = (parts.length > 1 ? " " : "") + value;
+      input.value = parts.join(";");
+    } else input.value = value;
+    list.hidden = true;
+    input.focus();
+  };
+  input.setAttribute("autocomplete", "off");
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    const q = current();
+    if (q.length < 2) { list.hidden = true; return; }
+    timer = setTimeout(async () => {
+      const mine = ++seq;
+      const sc = scope ? scope() : "";
+      let rows = [];
+      try {
+        rows = await api("GET", `/api/connections/${connectionId}/search?kind=${encodeURIComponent(kind)}&q=${encodeURIComponent(q)}` +
+          (sc ? `&scope=${encodeURIComponent(sc)}` : ""));
+      } catch (_) { /* suggestions are optional; the typed text is still used */ }
+      if (mine !== seq) return;
+      list.replaceChildren(...rows.map((r) => h("li", { role: "option", tabindex: "0",
+        onmousedown: (e) => { e.preventDefault(); put(r.value); },
+        onkeydown: (e) => {
+          if (e.key === "Enter") { e.preventDefault(); put(r.value); }
+          if (e.key === "ArrowDown" && e.target.nextSibling) e.target.nextSibling.focus();
+          if (e.key === "ArrowUp") (e.target.previousSibling || input).focus();
+          if (e.key === "Escape") { list.hidden = true; input.focus(); }
+        } }, r.label)));
+      list.hidden = !rows.length;
+    }, 350);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" && !list.hidden && list.firstChild) { e.preventDefault(); list.firstChild.focus(); }
+    if (e.key === "Escape") list.hidden = true;
+  });
+  input.addEventListener("blur", () => setTimeout(() => { if (!list.contains(document.activeElement)) list.hidden = true; }, 150));
+  return h("div", { class: "picker" }, input, list);
+}
+
+// Approvers are either a role (manager, owner, …) or a governance group: choose the type first, then —
+// for a group — type any part of its name. The cell stays editable as plain text.
+const APPROVER_TYPES = [["manager", "Manager of the requester"], ["owner", "Owner of the access profile"],
+  ["source_owner", "Source owner"], ["app_owner", "App owner"], ["governance_group", "Governance group…"]];
+function approverBuilder(input, connectionId) {
+  const type = h("select", { "aria-label": "Approver type" }, h("option", { value: "" }, "Add approver — choose type…"),
+    APPROVER_TYPES.map(([v, l]) => h("option", { value: v }, l)));
+  const groupInput = h("input", { placeholder: "Group name (type any part)" });
+  const groupBox = refSuggest(groupInput, "governance_group", false, connectionId);
+  const add = h("button", { type: "button" }, "Add");
+  groupBox.hidden = true;
+  add.hidden = true;
+  const append = (token) => {
+    const parts = input.value.split(";").map((p) => p.trim()).filter((p) => p && p.toLowerCase() !== "none");
+    if (!parts.some((p) => p.toLowerCase() === token.toLowerCase())) parts.push(token);
+    input.value = parts.join(";");
+    type.value = ""; groupInput.value = ""; groupBox.hidden = true; add.hidden = true;
+  };
+  type.addEventListener("change", () => {
+    const group = type.value === "governance_group";
+    groupBox.hidden = !group;
+    add.hidden = !type.value;
+    if (group) groupInput.focus();
+  });
+  add.addEventListener("click", (e) => {
+    e.preventDefault();
+    if (type.value === "governance_group") { if (groupInput.value.trim()) append("governance_group:" + groupInput.value.trim()); }
+    else if (type.value) append(type.value);
+  });
+  return h("div", {}, input, h("div", { class: "row approver-add" }, type, groupBox, add));
+}
+
+function approversInput(connectionId, placeholder) {
+  const el = h("input", { placeholder: placeholder || "" });
+  return { el: approverBuilder(el, connectionId), get value() { return el.value.trim(); } };
+}
+
 // Search-and-select for identities: type 2+ characters of a name, username or email, pick a person.
 // The selected identity's ID is used, so the result never depends on ambiguous free text.
 function identityPicker(connectionId, placeholder) {
@@ -784,7 +882,8 @@ async function renderReports() {
     const followup = r.followup_action && META.actions.find((a) => a.key === r.followup_action);
     Object.keys(inputs).forEach((k) => delete inputs[k]);
     const fields = r.params.map((p) => {
-      const field = p.kind === "identity" ? identityPicker(() => connSel.value, p.help) : plainInput(p.help);
+      const field = p.kind === "identity" ? identityPicker(() => connSel.value, p.help)
+        : p.kind === "approvers" ? approversInput(connSel.value, p.help) : plainInput(p.help);
       inputs[p.name] = field;
       return h("div", { class: "field" }, h("span", { class: "field-label" }, p.label, p.required ? " *" : ""), field.el);
     });
@@ -816,7 +915,8 @@ async function renderReports() {
 }
 
 function jobFromReportDialog(report, def, followup) {
-  const fields = def.fill.map((p) => ({ p, field: p.kind === "identity" ? identityPicker(() => report.connection_id, "Search by name, username or email") : plainInput(p.help) }));
+  const fields = def.fill.map((p) => ({ p, field: p.kind === "identity" ? identityPicker(() => report.connection_id, "Search by name, username or email")
+    : p.kind === "approvers" ? approversInput(report.connection_id, p.help) : plainInput(p.help) }));
   const check = h("input", { type: "checkbox", id: "report-job-check" });
   const create = h("button", { class: "primary", disabled: true, onclick: () => guarded(async () => {
     create.disabled = true;
