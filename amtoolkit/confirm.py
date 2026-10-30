@@ -119,6 +119,10 @@ class Confirmer:
                 lines.append(f"{_plural(counts['excluded'], 'row')} excluded (will not run)")
             if counts["warnings"]:
                 warnings.append(f"{_plural(counts['warnings'], 'row')} have warnings — check them before continuing")
+            new_groups = self.store.message_values(job_id, "gg_create")
+            if new_groups:
+                lines.append(f"{_plural(len(new_groups), 'governance group')} will be created from the CSV: "
+                             f"{', '.join(new_groups)}")
             if command == "approve":
                 lines += [f"Line {i['row_no']}: {i['op']} {i['target']}" for i in self._sample(job_id)]
                 lines.append("After approving you still need to press Start. Any later edit cancels the approval.")
@@ -144,6 +148,11 @@ class Confirmer:
             lines += [f"{_plural(s['succeeded'], 'change')} made by this job will be put into a new "
                       f"'{inverse.title if inverse else 'rollback'}' job",
                       "Nothing changes now: the new job opens in review and must be approved and started."]
+            created = self.store.created_governance_groups(job_id)
+            if created:
+                warnings.append(f"Governance groups created by this job are not deleted by the rollback: "
+                                f"{', '.join(g['name'] for g in created)}. Delete them with a 'Delete governance "
+                                "groups' job once nothing uses them.")
         elif command == "plan":
             title, verb = "Re-plan the job", "re-plan this job"
             lines += ["Every row that has not run yet is checked again with read-only lookups",

@@ -21,6 +21,8 @@ log = logging.getLogger(__name__)
 
 EDITABLE_JOB_STATUSES = ("review", "approved", "paused", "completed")
 APPROVABLE_JOB_STATUSES = ("review", "paused")
+# Actions whose approval_schemes name governance groups, and which can create missing ones from the CSV.
+GROUP_APPROVER_ACTIONS = ("access_profile.create", "access_profile.update")
 
 
 class Toolkit:
@@ -103,7 +105,8 @@ class Toolkit:
         active = self.engine.is_active(job_id)
         status = job["status"]
         blockers = self._blockers(counts)
-        missing_groups = self.store.message_values(job_id, "gg_missing") if job["action"] == "access_profile.create" else []
+        missing_groups = self.store.message_values(job_id, "gg_missing") if job["action"] in GROUP_APPROVER_ACTIONS else []
+        new_groups = self.store.message_values(job_id, "gg_create") if job["action"] in GROUP_APPROVER_ACTIONS else []
         allowed = {
             "edit": status in EDITABLE_JOB_STATUSES and not active,
             "replan": status in ("review", "approved", "paused") and not active,
@@ -126,7 +129,7 @@ class Toolkit:
             except NotFound:
                 pass
         return dict(job, counts=counts, approved=approved, active=active, blockers=blockers, allowed=allowed,
-                    missing_governance_groups=missing_groups, parent=parent,
+                    missing_governance_groups=missing_groups, new_governance_groups=new_groups, parent=parent,
                     action_title=action.title if action else job["action"],
                     experimental=bool(action and action.experimental),
                     connection={"id": conn["id"], "name": conn["name"], "environment": conn["environment"],

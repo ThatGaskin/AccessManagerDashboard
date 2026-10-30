@@ -134,3 +134,55 @@ def test_sailpoint_group_lookup_uses_workgroups_endpoint():
     method, url, kw = session.calls[0]
     assert url.endswith("/v2025/workgroups") and kw["params"]["filters"] == 'name eq "Finance Approvers"'
     assert kw["headers"]["X-SailPoint-Experimental"] == "true"
+
+
+def test_csv_creates_missing_groups_when_rows_run(toolkit, sandbox):
+    csv = (b"name,owner,source,entitlements,approval_schemes,new_group_owner,new_group_members\n"
+           b"AP1,alice,Active Directory,Finance-Read,manager;governance_group:Audit Team,carol,alice;bob\n"
+           b"AP2,alice,Active Directory,HR-Read,governance_group:audit team,carol,bob;alice\n")
+    job_id = make_job(toolkit, sandbox, csv)
+    planned = rows(job_id, toolkit)
+    assert [i["op"] for i in planned] == ["create", "create"]
+    assert planned[0]["payload"]["accessRequestConfig"]["approvalSchemes"][1] == {
+        "approverType": "GOVERNANCE_GROUP", "approverId": None, "newGroup": "Audit Team"}
+    assert planned[0]["payload"]["new_governance_groups"][0]["group"]["owner"]["name"]
+    view = toolkit.job_view(job_id)
+    assert view["missing_governance_groups"] == [] and view["new_governance_groups"] == ["Audit Team"]
+    summary = toolkit_confirm_lines(toolkit, job_id, "approve")
+    assert any("will be created from the CSV: Audit Team" in line for line in summary)
+
+    approve(toolkit, job_id)
+    run_to_end(toolkit, job_id)
+    done = rows(job_id, toolkit)
+    assert [i["status"] for i in done] == ["succeeded", "succeeded"]
+    connector = toolkit.connections.build(sandbox["id"])
+    group = connector.find_governance_groups("Audit Team")
+    assert len(group) == 1 and group[0]["member_count"] == 2
+    assert done[0]["result"]["created_groups"] == [{"id": group[0]["id"], "name": "Audit Team"}]
+    assert done[1]["result"]["created_groups"] == []  # reused the group created by the first row
+    profile = connector.get_access_profile(done[0]["remote_id"])
+    assert profile["accessRequestConfig"]["approvalSchemes"][1] == {"approverType": "GOVERNANCE_GROUP",
+                                                                    "approverId": group[0]["id"]}
+    assert toolkit.store.created_governance_groups(job_id) == done[0]["result"]["created_groups"]
+
+
+def toolkit_confirm_lines(toolkit, job_id, command):
+    from amtoolkit.confirm import Confirmer
+    return Confirmer(toolkit).job_summary(job_id, command)["lines"]
+
+
+def test_csv_group_definitions_must_agree(toolkit, sandbox):
+    csv = (b"name,owner,source,entitlements,approval_schemes,new_group_owner,new_group_members\n"
+           b"AP1,alice,Active Directory,Finance-Read,governance_group:Audit Team,carol,alice\n"
+           b"AP2,alice,Active Directory,HR-Read,governance_group:Audit Team,bob,alice\n")
+    planned = rows(make_job(toolkit, sandbox, csv), toolkit)
+    assert [i["op"] for i in planned] == ["create", "error"]
+    assert any(m["code"] == "gg_conflict" for m in planned[1]["messages"])
+
+
+def test_csv_group_with_unknown_owner_is_an_error(toolkit, sandbox):
+    csv = (b"name,owner,source,entitlements,approval_schemes,new_group_owner\n"
+           b"AP1,alice,Active Directory,Finance-Read,governance_group:Audit Team,nobody@example.com\n")
+    item = rows(make_job(toolkit, sandbox, csv), toolkit)[0]
+    assert item["op"] == "error"
+    assert any(m["field"] == "new_group_owner" and m["level"] == "error" for m in item["messages"])

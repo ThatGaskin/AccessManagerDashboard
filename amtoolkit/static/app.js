@@ -188,7 +188,11 @@ const ACTION_NOTES = {
   "access_profile.create": [
     "Owners: an access profile is owned by one person. Put an identity (email, username or ID) in the owner column — governance groups cannot own access profiles.",
     "Approvers: to let a team approve requests, add governance_group:<group name> to approval_schemes, e.g. manager;governance_group:Finance Approvers. The plan checks that each group exists and warns when it has no members.",
-    "Missing groups: if a referenced group does not exist, the row is flagged and the job offers “Create missing governance groups”, which prepares a separate job for you to review and approve. Re-plan this job once the groups exist.",
+    "Creating groups from the CSV: fill in new_group_owner (and new_group_members, new_group_description) and any group named in approval_schemes that does not exist yet is created right before the row's access profile. The plan lists every group that will be created; rows naming the same new group must use the same new_group_* values.",
+    "Missing groups: without new_group_owner, a row referencing a group that does not exist is flagged and the job offers “Create missing governance groups”, which prepares a separate job for you to review and approve. Re-plan this job once the groups exist.",
+  ],
+  "access_profile.update": [
+    "Approvers: approval_schemes replaces all approvers. To use a governance group that does not exist yet, fill in new_group_owner (and new_group_members); the group is created right before the profile is updated.",
   ],
   "governance_group.create": [
     "A governance group is a team of identities used as approvers and reviewers. It has one owner (a person) and any number of members.",
@@ -435,8 +439,11 @@ async function renderJob(jobId) {
     if (j.status === "pausing") banners.push(h("div", { class: "banner info" }, "Pausing after the current row finishes…"));
     if (j.missing_governance_groups.length) banners.push(h("div", { class: "banner warn" },
       `${j.missing_governance_groups.length} governance group(s) used as approvers do not exist yet: `,
-      h("strong", {}, j.missing_governance_groups.join(", ")), ". Create them in a separate job (reviewed and approved like any other), then Re-plan this job. ",
+      h("strong", {}, j.missing_governance_groups.join(", ")), ". Fill in new_group_owner (and new_group_members) on those rows to create them with this job, or create them in a separate job (reviewed and approved like any other), then Re-plan this job. ",
       a.create_groups ? h("button", { onclick: () => missingGroupsDialog(j) }, "Create missing governance groups…") : null));
+    if (j.new_governance_groups.length) banners.push(h("div", { class: "banner info" },
+      `${j.new_governance_groups.length} governance group(s) will be created from the CSV when the rows that use them run: `,
+      h("strong", {}, j.new_governance_groups.join(", ")), ". A rollback of this job does not delete them."));
     if (j.parent && j.action === "governance_group.create" && j.parent.action === "access_profile.create" && j.status === "completed") {
       const canReplan = ["review", "approved", "paused"].includes(j.parent.status);
       banners.push(h("div", { class: "banner info" }, "Groups are ready. Re-plan ", h("a", { href: `#/jobs/${j.parent.id}` }, j.parent.name),

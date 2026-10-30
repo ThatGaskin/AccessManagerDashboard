@@ -8,10 +8,13 @@ every field before the change and refuse to apply when the object changed after 
 from ..connectors import model
 from ..connectors.base import AuthError, ConfigError, ConnectorError
 from ..util import parse_bool, split_list
-from .access_profiles import APPROVER_TYPES, _lookup_one, _resolve_group, _resolve_owner
+from .access_profiles import (APPROVER_TYPES, NEW_GROUP_COLUMNS, NewGroups, _lookup_one, _resolve_group, _resolve_owner,
+                              ensure_new_groups, groups_note)
 from .base import Action, Column, ItemFailed, Outcome, Plan, msg
 
 CLEAR = "(clear)"
+# Approver token for a governance group the row creates; replaced by the real ID when the row runs.
+NEW_GROUP_TOKEN = "governance_group:new:"
 
 
 def _yes_no(value):
@@ -52,7 +55,7 @@ def _parse_bool_column(row, key, m):
         return None
 
 
-def _parse_schemes(ctx, text, m):
+def _parse_schemes(ctx, text, m, new_groups=None):
     """approval_schemes column → normalized tokens. 'none' means no approval."""
     if text.strip().lower() == "none":
         return []
@@ -60,8 +63,10 @@ def _parse_schemes(ctx, text, m):
     for part in split_list(text):
         low = part.lower().replace(" ", "_")
         if low.startswith("governance_group:"):
-            group = _resolve_group(ctx, part.split(":", 1)[1].strip(), m)
-            if group:
+            group = _resolve_group(ctx, part.split(":", 1)[1].strip(), m, new_groups=new_groups)
+            if group and group.get("new"):
+                tokens.append(NEW_GROUP_TOKEN + group["name"])
+            elif group:
                 tokens.append(f"governance_group:{group['id']}")
         elif low in APPROVER_TYPES:
             tokens.append(model.APPROVER_TOKENS[APPROVER_TYPES[low]])
@@ -118,6 +123,10 @@ class ObjectUpdateAction(ExperimentalAction):
             m.append(msg("info", f"{field}: {labels[field][0]} → {labels[field][1]}", field, "change"))
         payload = {"object": {"type": current["type"], "id": current["id"], "name": current["name"]},
                    "before": {f: current.get(f) for f in changes}, "after": changes, "labels": labels}
+        new_groups = [ctx.cached(("new_governance_group", t[len(NEW_GROUP_TOKEN):].lower()), lambda: None)
+                      for t in changes.get("approval_schemes") or [] if t.startswith(NEW_GROUP_TOKEN)]
+        if new_groups:
+            payload["new_governance_groups"] = new_groups
         return Plan("update", current["name"], payload, m)
 
     def execute(self, ctx, item, options):
@@ -126,11 +135,20 @@ class ObjectUpdateAction(ExperimentalAction):
         current = ctx.connector.get_object(obj["type"], obj["id"])
         if current is None:
             raise ItemFailed(f"{model.TYPE_LABELS[obj['type']]} no longer exists")
+        drift = [f for f in p["after"] if not model.same(current.get(f), p["before"][f])]
+        created_groups = []
+        if p.get("new_governance_groups"):
+            # When the object changed since planning, only look the groups up (an earlier attempt may have
+            # applied this very change); they are created only when the change can still be applied.
+            group_ids, created_groups = ensure_new_groups(ctx, p["new_governance_groups"],
+                                                          (item.get("result") or {}).get("in_doubt"), create=not drift)
+            p = dict(p, after=dict(p["after"], approval_schemes=[
+                f"governance_group:{group_ids.get(t[len(NEW_GROUP_TOKEN):].lower(), t)}"
+                if t.startswith(NEW_GROUP_TOKEN) else t for t in p["after"]["approval_schemes"]]))
         if all(model.same(current.get(f), v) for f, v in p["after"].items()):
             in_doubt = (item.get("result") or {}).get("in_doubt")
             return Outcome("succeeded" if in_doubt else "skipped", obj["id"], "Already has the requested values",
                            {"reconciled": bool(in_doubt)})
-        drift = [f for f in p["after"] if not model.same(current.get(f), p["before"][f])]
         if drift:
             raise ItemFailed(f"Changed by someone else since planning ({', '.join(drift)}). Re-check this row "
                              "to see the current values before applying.")
@@ -140,7 +158,8 @@ class ObjectUpdateAction(ExperimentalAction):
             if isinstance(exc, (AuthError, ConfigError)):
                 raise
             raise ItemFailed(str(exc), retryable=exc.retryable, in_doubt=exc.ambiguous) from None
-        return Outcome("succeeded", obj["id"], "Updated " + ", ".join(p["after"]), {"before": p["before"]})
+        return Outcome("succeeded", obj["id"], "Updated " + ", ".join(p["after"]) + groups_note(created_groups),
+                       {"before": p["before"], "created_groups": created_groups})
 
     def rollback_row(self, item):
         if item["status"] != "succeeded" or not item.get("payload"):
@@ -172,6 +191,7 @@ class UpdateAccessProfiles(ObjectUpdateAction):
                "manager;governance_group:Finance Approvers"),
         Column("add_entitlements", False, "Entitlements on the profile's source to add, separated by ';'.", ""),
         Column("remove_entitlements", False, "Entitlements to remove, separated by ';'.", ""),
+        *[Column(c.name, False, c.help, "") for c in NEW_GROUP_COLUMNS],
     ]
 
     def duplicate_key(self, row):
@@ -196,7 +216,7 @@ class UpdateAccessProfiles(ObjectUpdateAction):
             if value is not None:
                 want[key] = value
         if row.get("approval_schemes"):
-            want["approval_schemes"] = _parse_schemes(ctx, row["approval_schemes"], m)
+            want["approval_schemes"] = _parse_schemes(ctx, row["approval_schemes"], m, NewGroups(ctx, row, m))
         adds, removes = split_list(row.get("add_entitlements")), split_list(row.get("remove_entitlements"))
         if adds or removes:
             ents = set(current["entitlements"])

@@ -242,3 +242,17 @@ def test_identity_search_api(client, sandbox):
     found = client.get(f"/api/connections/{sandbox['id']}/identities?q=ali").get_json()
     assert [i["name"] for i in found] == ["Alice Admin"]
     assert client.get(f"/api/connections/{sandbox['id']}/identities?q=a").get_json() == []
+
+
+def test_update_access_profile_creates_missing_approver_group(toolkit, sandbox):
+    j = job(toolkit, sandbox, "access_profile.update",
+            "access_profile,approval_schemes,new_group_owner,new_group_members\n"
+            "Legacy VPN,governance_group:VPN Approvers,carol,alice;bob\n")
+    item = items(toolkit, j)[0]
+    assert item["op"] == "update"
+    assert item["payload"]["after"]["approval_schemes"] == ["governance_group:new:VPN Approvers"]
+    assert run(toolkit, j)["succeeded"] == 1
+    connector = toolkit.connections.build(sandbox["id"])
+    gid = connector.find_governance_groups("VPN Approvers")[0]["id"]
+    assert obj(toolkit, sandbox, "access_profile", LEGACY_VPN)["approval_schemes"] == [f"governance_group:{gid}"]
+    assert {m["id"] for m in connector.list_governance_group_members(gid)} == {ALICE, BOB}

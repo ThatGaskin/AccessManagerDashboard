@@ -246,6 +246,14 @@ class Store:
                     values.setdefault(m["value"].lower(), m["value"])
         return sorted(values.values(), key=str.lower)
 
+    def created_governance_groups(self, job_id):
+        """Governance groups that rows of this job created along the way (new_group_* columns)."""
+        groups = []
+        for r in self.db.query("SELECT result FROM items WHERE job_id = ? AND result LIKE '%created_groups%'",
+                               (job_id,)):
+            groups += (loads(r["result"], None) or {}).get("created_groups") or []
+        return groups
+
     def item_ids(self, job_id, filter_name):
         where = self.ITEM_FILTERS[filter_name]
         return [r[0] for r in self.db.query(f"SELECT id FROM items WHERE job_id = ? {where}", (job_id,))]

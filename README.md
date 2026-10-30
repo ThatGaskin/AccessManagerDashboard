@@ -147,6 +147,9 @@ delimiters and UTF-8 (with or without BOM) / Windows-1252 encodings are accepted
 | `requestable`, `enabled` | | yes/no, default yes. |
 | `approval_schemes` | | In order, separated by `;`: `manager`, `owner`, `source_owner`, `app_owner`, `governance_group:<name or ID>`. |
 | `comments_required`, `denial_comments_required` | | yes/no, default no. |
+| `new_group_owner` | | Fill in to create governance groups named in `approval_schemes` that do not exist yet (see below). |
+| `new_group_members` | | Members of those new groups, separated by `;`. Warned when empty. |
+| `new_group_description` | | Description of those new groups. |
 
 ## Ownership and governance groups
 
@@ -156,7 +159,15 @@ delimiters and UTF-8 (with or without BOM) / Windows-1252 encodings are accepted
 * **Governance groups approve.** Add `governance_group:Finance Approvers` (name or ID) to
   `approval_schemes`. The plan resolves the group, shows its ID, and warns when it has no members —
   approvals assigned to an empty group can never be completed.
-* **Missing groups.** Rows that reference a group that does not exist are flagged, and the job shows
+* **Creating groups from the CSV.** Fill in `new_group_owner` (plus `new_group_members` and
+  `new_group_description`) and every group named in `approval_schemes` that does not exist yet is
+  created when the row runs, right before its access profile. The plan resolves the owner and members,
+  lists each group that will be created, and the approval summary repeats the list. Rows that name the
+  same new group must use the same `new_group_*` values; the first row to run creates it and later rows
+  reuse it. If adding members fails, **Retry failed** finds the group and only completes it. A rollback
+  deletes the access profiles but not these groups; delete them with a *Delete governance groups* job.
+  *Update access profiles* accepts the same three columns.
+* **Missing groups.** Without `new_group_owner`, rows that reference a group that does not exist are flagged, and the job shows
   **Create missing governance groups…**. That prepares a separate *Create governance groups* job (you
   choose the owner and members) which goes through the same review → approve → run flow. When it has
   finished, its page offers **Re-plan that job now** for the access profile job.
