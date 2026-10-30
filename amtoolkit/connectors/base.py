@@ -75,9 +75,23 @@ class Connector:
     def get_access_profile(self, profile_id: str):
         raise NotImplementedError
 
+    def find_governance_groups(self, ref: str) -> list:
+        """Governance groups (ISC "workgroups") by ID or exact name."""
+        raise NotImplementedError
+
     # --- changes
     def create_access_profile(self, payload: dict) -> dict:
         raise NotImplementedError
 
     def delete_access_profile(self, profile_id: str) -> None:
+        raise NotImplementedError
+
+    def create_governance_group(self, payload: dict) -> dict:
+        raise NotImplementedError
+
+    def add_governance_group_members(self, group_id: str, identity_ids: list) -> list:
+        """Adds members; returns a list of human-readable problems (empty when all were added)."""
+        raise NotImplementedError
+
+    def delete_governance_group(self, group_id: str) -> None:
         raise NotImplementedError

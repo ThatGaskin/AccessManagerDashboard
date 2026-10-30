@@ -101,6 +101,7 @@ class Toolkit:
         active = self.engine.is_active(job_id)
         status = job["status"]
         blockers = self._blockers(counts)
+        missing_groups = self.store.message_values(job_id, "gg_missing") if job["action"] == "access_profile.create" else []
         allowed = {
             "edit": status in EDITABLE_JOB_STATUSES and not active,
             "replan": status in ("review", "approved", "paused") and not active,
@@ -113,8 +114,17 @@ class Toolkit:
             "rollback": bool(action and action.inverse) and status in ("completed", "paused", "cancelled")
                         and counts["status"]["succeeded"] > 0 and not active,
             "delete": status not in ("planning", "running", "pausing") and not active,
+            "create_groups": bool(missing_groups) and not active,
         }
+        parent = None
+        if job["parent_job_id"]:
+            try:
+                p = self.store.get_job(job["parent_job_id"])
+                parent = {"id": p["id"], "name": p["name"], "action": p["action"], "status": p["status"]}
+            except NotFound:
+                pass
         return dict(job, counts=counts, approved=approved, active=active, blockers=blockers, allowed=allowed,
+                    missing_governance_groups=missing_groups, parent=parent,
                     action_title=action.title if action else job["action"],
                     connection={"id": conn["id"], "name": conn["name"], "environment": conn["environment"],
                                 "kind": conn["kind"], "secret_status": self.connections.secret_status(conn)})
@@ -274,6 +284,28 @@ class Toolkit:
                                  parent_job_id=job_id, rows=[(n, inverse.normalize(r)) for n, r in rows])
         self.store.add_event(job_id, "info", "rollback_created",
                              f"Rollback job created with {len(rows)} row(s)", data={"job_id": new_id})
+        return new_id
+
+    def create_missing_governance_groups(self, job_id, owner, description="", members=""):
+        """Builds a 'Create governance groups' job for every group an access profile job refers to but which
+        does not exist yet. It goes through the normal plan → review → approve flow."""
+        job = self.store.get_job(job_id)
+        names = self.store.message_values(job_id, "gg_missing")
+        if not names:
+            raise JobStateError("This job does not reference any missing governance groups")
+        owner = (owner or "").strip()
+        if not owner:
+            raise ValueError("Choose an owner for the new groups (email, username or identity ID)")
+        action = get_action("governance_group.create")
+        rows = [(n + 1, action.normalize({"name": name, "owner": owner, "members": members or "",
+                                          "description": description or f"Approvers for access profiles in '{job['name']}'"}))
+                for n, name in enumerate(names)]
+        new_id = self.create_job(name=f"Governance groups for {job['name']}", action_key=action.key,
+                                 connection_id=job["connection_id"], options={}, filename=None, data=None,
+                                 parent_job_id=job_id, rows=rows)
+        self.store.add_event(job_id, "info", "groups_job_created",
+                             f"Created a job to add {len(names)} missing governance group(s): {', '.join(names)}. "
+                             "Re-plan this job after it has run.", data={"job_id": new_id, "groups": names})
         return new_id
 
     def delete_job(self, job_id):

@@ -1,7 +1,7 @@
 # Access Manager Toolkit
 
-A local, browser-based toolkit for the bulk operations access managers do — starting with **creating
-access profiles from a CSV file** (and rolling them back). It talks to the target system's REST API,
+A local, browser-based toolkit for the bulk operations access managers do — **creating access profiles
+and governance groups from CSV files** (and rolling them back). It talks to the target system's REST API,
 shows live progress, lets you **pause, resume or cancel at any time**, and makes you **review and
 approve exactly what will change** before anything is sent.
 
@@ -101,14 +101,17 @@ From a source checkout the data folder defaults to `./data`. `python -m amtoolki
 
 1. Create an API client (or personal access token) for a **service identity**, ideally in a sandbox
    tenant first. Grant only what the actions need, e.g. `idn:access-profile:manage`,
-   `idn:sources:read`, `idn:entitlement:read`, `idn:identity:read`.
+   `idn:sources:read`, `idn:entitlement:read`, `idn:identity:read`, plus `idn:workgroup:read` and
+   `idn:workgroup:write` for governance groups.
 2. In **Connections → Add SailPoint Identity Security Cloud** enter the API base URL
    (`https://<tenant>.api.identitynow.com`), the client ID, and choose the environment.
 3. Provide the secret: `export AMT_CLIENT_SECRET=...` before `python run.py`, or **Set secret** in the UI.
 4. **Test** the connection.
 
 Endpoints used: `POST /oauth/token`, `GET /v3/public-identities`, `GET /v3/sources`,
-`GET /{beta|v2024|v2025}/entitlements` (configurable per connection), `GET/POST/DELETE /v3/access-profiles`.
+`GET /{beta|v2024|v2025}/entitlements` and `/{beta|v2024|v2025}/workgroups` (governance groups,
+including `members/bulk-add`) — both versions configurable per connection — and
+`GET/POST/DELETE /v3/access-profiles`.
 
 ## CSV format — Create access profiles
 
@@ -119,12 +122,38 @@ delimiters and UTF-8 (with or without BOM) / Windows-1252 encodings are accepted
 |---|---|---|
 | `name` | yes | Unique, max 128 characters. Existing names are skipped (or flagged as errors — job option). |
 | `description` | | Warned when empty. |
-| `owner` | yes | Email, username (alias) or identity ID. |
+| `owner` | yes | Email, username (alias) or identity ID. Must be a person — see below. |
 | `source` | yes | Source name. |
 | `entitlements` | yes | Entitlement names or values on that source, separated by `;` (or `|`). |
 | `requestable`, `enabled` | | yes/no, default yes. |
-| `approval_schemes` | | `manager;owner;source_owner;app_owner;governance_group:<id>` in order. |
+| `approval_schemes` | | In order, separated by `;`: `manager`, `owner`, `source_owner`, `app_owner`, `governance_group:<name or ID>`. |
 | `comments_required`, `denial_comments_required` | | yes/no, default no. |
+
+## Ownership and governance groups
+
+* **Owners are people.** In Identity Security Cloud an access profile is owned by exactly one identity.
+  If a governance group name is put in the `owner` column, the plan flags the row and explains that the
+  group should be used as an approver instead.
+* **Governance groups approve.** Add `governance_group:Finance Approvers` (name or ID) to
+  `approval_schemes`. The plan resolves the group, shows its ID, and warns when it has no members —
+  approvals assigned to an empty group can never be completed.
+* **Missing groups.** Rows that reference a group that does not exist are flagged, and the job shows
+  **Create missing governance groups…**. That prepares a separate *Create governance groups* job (you
+  choose the owner and members) which goes through the same review → approve → run flow. When it has
+  finished, its page offers **Re-plan that job now** for the access profile job.
+
+### CSV format — Create governance groups
+
+| Column | Required | Notes |
+|---|---|---|
+| `name` | yes | Unique, max 128 characters. Existing names are skipped (or flagged — job option). |
+| `description` | | |
+| `owner` | yes | One person: email, username (alias) or identity ID. |
+| `members` | | Identities separated by `;`. Warned when empty. |
+
+Members are added right after the group is created. If that step fails, the row fails with the group's
+ID and **Retry failed** only adds the members to the existing group. Rollback deletes the groups the
+job created. See `examples/governance_groups_sandbox.csv`.
 
 ## Project layout
 
@@ -137,13 +166,14 @@ amtoolkit/
   engine.py                background runners: plan / execute / pause / cancel / crash recovery
   store.py, db.py          SQLite persistence (WAL), job & item state machine, audit log
   csvio.py                 CSV parsing/export
-  actions/                 bulk actions (CSV schema → plan → execute → rollback)
+  actions/                 bulk actions (CSV schema → plan → execute → rollback):
+                           access profiles and governance groups, create + delete
   connectors/              target systems: SailPoint ISC, offline sandbox; resilient HTTP client
   static/                  single-page UI (vanilla JS/CSS, no build step)
 tests/                     pytest suite (workflow, safety rules, HTTP retry logic, API security)
 packaging/build_pyz.py     builds the single-file AccessManagerToolkit.pyz
 .github/workflows/         CI (tests on Linux + Windows) and Release (build, smoke-test, publish .pyz)
-examples/                  sample CSV for the sandbox
+examples/                  sample CSVs for the sandbox
 ```
 
 ### Adding another bulk action

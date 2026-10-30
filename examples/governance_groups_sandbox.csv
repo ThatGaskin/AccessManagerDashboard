@@ -1,0 +1,3 @@
+name,description,owner,members
+HR Approvers,Approves access to HR systems,carol@example.com,carol;alice
+Sales Approvers,Approves Salesforce access,bob@example.com,bob@example.com

@@ -238,6 +238,16 @@ class Store:
                             f"AND status IN ('pending', 'failed')", (int(included), now_iso(), job_id, *item_ids))
             return cur.rowcount
 
+    def message_values(self, job_id, code):
+        """Distinct `value`s of messages with the given code on included rows, e.g. missing group names."""
+        values = {}
+        for r in self.db.query("SELECT messages FROM items WHERE job_id = ? AND included = 1 AND messages LIKE ?",
+                               (job_id, f'%"code":"{code}"%')):
+            for m in loads(r["messages"], []):
+                if m.get("code") == code and m.get("value"):
+                    values.setdefault(m["value"].lower(), m["value"])
+        return sorted(values.values(), key=str.lower)
+
     def item_ids(self, job_id, filter_name):
         where = self.ITEM_FILTERS[filter_name]
         return [r[0] for r in self.db.query(f"SELECT id FROM items WHERE job_id = ? {where}", (job_id,))]

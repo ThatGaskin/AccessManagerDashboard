@@ -2,7 +2,7 @@
 
 Uses a Personal Access Token or API client (OAuth2 client credentials). Grant it only the scopes the
 actions need, e.g. `idn:access-profile:manage`, `idn:sources:read`, `idn:entitlement:read`,
-`idn:identity:read`.
+`idn:identity:read`, and `idn:workgroup:read` / `idn:workgroup:write` for governance groups.
 """
 import re
 
@@ -35,6 +35,9 @@ class SailPointISC(Connector):
         Field("entitlements_api", "Entitlements API version", default="beta",
               help="Path segment for the entitlements endpoint (beta, v2024, v2025 …).",
               choices=["beta", "v2024", "v2025", "v3"]),
+        Field("workgroups_api", "Governance groups API version", default="beta",
+              help="Path segment for the governance groups (workgroups) endpoint.",
+              choices=["beta", "v2024", "v2025"]),
         Field("max_calls_per_10s", "Rate limit (calls / 10 s)", default="80",
               help="Client-side throttle. ISC allows roughly 100 requests per 10 seconds per token."),
     ]
@@ -48,9 +51,12 @@ class SailPointISC(Connector):
                                                      secret_provider)
         self.api = ApiClient(base, self.token, limiter=limiter, abort_event=abort_event, session=session)
         self.ent_api = (config.get("entitlements_api") or "beta").strip("/")
+        self.wg_api = (config.get("workgroups_api") or "beta").strip("/")
+        # Versioned endpoints that are still experimental in a given release require this header.
+        self.wg_headers = {} if self.wg_api == "beta" else {"X-SailPoint-Experimental": "true"}
 
-    def _list(self, path, filters, limit=10):
-        return self.api.request("GET", path, params={"filters": filters, "limit": limit}) or []
+    def _list(self, path, filters, limit=10, headers=None):
+        return self.api.request("GET", path, params={"filters": filters, "limit": limit}, headers=headers) or []
 
     def test(self):
         self.token.get(force=True)
@@ -96,3 +102,42 @@ class SailPointISC(Connector):
 
     def delete_access_profile(self, profile_id):
         self.api.request("DELETE", f"/v3/access-profiles/{profile_id}")
+
+    # ---------------------------------------------------------------- governance groups ("workgroups")
+    @staticmethod
+    def _group(g):
+        owner = g.get("owner") or {}
+        return {"id": g["id"], "name": g.get("name"), "owner": owner.get("displayName") or owner.get("name"),
+                "member_count": g.get("memberCount")}
+
+    def find_governance_groups(self, value):
+        value = value.strip()
+        if ID_RE.match(value) or re.match(r"^[0-9a-f-]{36}$", value, re.I):
+            try:
+                g = self.api.request("GET", f"/{self.wg_api}/workgroups/{value}", headers=self.wg_headers)
+            except ConnectorError as exc:
+                if exc.status != 404:
+                    raise
+            else:
+                return [self._group(g)] if g else []
+        found = self._list(f"/{self.wg_api}/workgroups", f"name eq {q(value)}", headers=self.wg_headers)
+        return [self._group(g) for g in found if (g.get("name") or "").lower() == value.lower()]
+
+    def create_governance_group(self, payload):
+        return self.api.request("POST", f"/{self.wg_api}/workgroups", json=payload, headers=self.wg_headers)
+
+    def add_governance_group_members(self, group_id, identity_ids):
+        if not identity_ids:
+            return []
+        body = [{"type": "IDENTITY", "id": i} for i in identity_ids]
+        result = self.api.request("POST", f"/{self.wg_api}/workgroups/{group_id}/members/bulk-add", json=body,
+                                  headers=self.wg_headers)
+        problems = []
+        for entry in result if isinstance(result, list) else []:
+            status = entry.get("status") if isinstance(entry, dict) else None
+            if status and int(status) not in (200, 201, 204, 409):  # 409 = already a member
+                problems.append(f"{entry.get('id')}: HTTP {status} {entry.get('description') or ''}".strip())
+        return problems
+
+    def delete_governance_group(self, group_id):
+        self.api.request("DELETE", f"/{self.wg_api}/workgroups/{group_id}", headers=self.wg_headers)

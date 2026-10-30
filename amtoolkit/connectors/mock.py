@@ -22,6 +22,11 @@ SEED = {
     ],
     "entitlements": [],
     "access_profiles": [],
+    "governance_groups": [
+        {"id": "2c9180867a4e5b2a017a4f1d2b3c0001", "name": "Finance Approvers", "description": "Approves finance access",
+         "owner": {"type": "IDENTITY", "id": "2c9180835d2e5168015d32f890ca1581", "name": "Alice Admin"},
+         "members": ["2c9180835d2e5168015d32f890ca1581", "2c9180835d2e5168015d32f890ca1583"]},
+    ],
 }
 for _src, _names in (("2c91808568c529c60168cca6f90c1301",
                       ["Domain Users", "VPN Users", "Finance-Read", "Finance-Write", "HR-Read", "HR-Write",
@@ -55,9 +60,10 @@ class MockTenant(Connector):
         self.failure_rate = float(config.get("failure_rate") or 0)
 
     def _state(self):
-        if self.path.exists():
-            return json.loads(self.path.read_text("utf-8"))
-        return json.loads(json.dumps(SEED))
+        state = json.loads(self.path.read_text("utf-8")) if self.path.exists() else json.loads(json.dumps(SEED))
+        for key, value in SEED.items():  # sandboxes created by older versions lack newer collections
+            state.setdefault(key, json.loads(json.dumps(value)))
+        return state
 
     def _save(self, state):
         tmp = self.path.with_suffix(".tmp")
@@ -79,7 +85,7 @@ class MockTenant(Connector):
         with _lock:
             state = self._state()
         return (f"Sandbox ready: {len(state['identities'])} identities, {len(state['sources'])} sources, "
-                f"{len(state['access_profiles'])} access profiles")
+                f"{len(state['access_profiles'])} access profiles, {len(state['governance_groups'])} governance groups")
 
     def find_identities(self, value):
         self._delay()
@@ -132,5 +138,48 @@ class MockTenant(Connector):
             before = len(state["access_profiles"])
             state["access_profiles"] = [p for p in state["access_profiles"] if p["id"] != profile_id]
             if len(state["access_profiles"]) == before:
+                raise ConnectorError("Not found", status=404)
+            self._save(state)
+
+    def find_governance_groups(self, value):
+        self._delay()
+        v = value.strip().lower()
+        with _lock:
+            return [{"id": g["id"], "name": g["name"], "owner": g["owner"].get("name"), "member_count": len(g["members"])}
+                    for g in self._state()["governance_groups"] if v in (g["id"].lower(), g["name"].lower())]
+
+    def create_governance_group(self, payload):
+        self._delay()
+        self._maybe_fail()
+        with _lock:
+            state = self._state()
+            if any(g["name"].lower() == payload["name"].lower() for g in state["governance_groups"]):
+                raise ConnectorError(f"HTTP 400: Governance group '{payload['name']}' already exists", status=400)
+            group = dict(payload, id=uuid.uuid4().hex, members=[])
+            state["governance_groups"].append(group)
+            self._save(state)
+        return group
+
+    def add_governance_group_members(self, group_id, identity_ids):
+        self._delay()
+        with _lock:
+            state = self._state()
+            group = next((g for g in state["governance_groups"] if g["id"] == group_id), None)
+            if group is None:
+                raise ConnectorError("Not found", status=404)
+            known = {i["id"] for i in state["identities"]}
+            problems = [f"{i}: HTTP 404 identity not found" for i in identity_ids if i not in known]
+            group["members"] = sorted(set(group["members"]) | ({*identity_ids} & known))
+            self._save(state)
+        return problems
+
+    def delete_governance_group(self, group_id):
+        self._delay()
+        self._maybe_fail()
+        with _lock:
+            state = self._state()
+            before = len(state["governance_groups"])
+            state["governance_groups"] = [g for g in state["governance_groups"] if g["id"] != group_id]
+            if len(state["governance_groups"]) == before:
                 raise ConnectorError("Not found", status=404)
             self._save(state)

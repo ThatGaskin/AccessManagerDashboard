@@ -230,6 +230,13 @@ def create_app(data_dir, *, allowed_hosts=None):
         toolkit.replan(job_id)
         return jsonify(ok=True)
 
+    @app.post("/api/jobs/<job_id>/missing-governance-groups")
+    def missing_groups(job_id):
+        data = body()
+        new_id = toolkit.create_missing_governance_groups(job_id, data.get("owner"), data.get("description", ""),
+                                                          data.get("members", ""))
+        return jsonify(id=new_id), 201
+
     @app.get("/api/jobs/<job_id>/approval")
     def approval_preview(job_id):
         return jsonify(toolkit.approval_preview(job_id))

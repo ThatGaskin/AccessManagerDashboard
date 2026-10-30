@@ -1,8 +1,8 @@
 name,description,owner,source,entitlements,requestable,enabled,approval_schemes,comments_required,denial_comments_required
 Finance - Read,Read-only access to finance shares,alice@example.com,Active Directory,Finance-Read,yes,yes,manager,no,no
-Finance - Write,Edit access to finance shares,alice@example.com,Active Directory,Finance-Read;Finance-Write,yes,yes,manager;owner,yes,yes
+Finance - Write,Edit access to finance shares,alice@example.com,Active Directory,Finance-Read;Finance-Write,yes,yes,manager;governance_group:Finance Approvers,yes,yes
 HR - Read,Read-only HR data,carol,Active Directory,HR-Read,yes,yes,manager,no,no
-HR - Write,,carol,Active Directory,HR-Read;HR-Write,yes,yes,manager;source_owner,yes,no
+HR - Write,,carol,Active Directory,HR-Read;HR-Write,yes,yes,manager;governance_group:HR Approvers,yes,no
 Sales - Standard,Salesforce standard user,bob@example.com,Salesforce,Standard User,yes,yes,manager,no,no
 Sales - Manager,Salesforce sales manager,bob@example.com,Salesforce,Sales Manager;Standard User,yes,yes,manager;owner,no,no
 Payroll Admin,Payroll administration,dave@example.com,Workday,Payroll Admin,yes,yes,owner,yes,yes

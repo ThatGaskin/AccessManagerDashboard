@@ -140,7 +140,7 @@ class ApiClient:
                     return str(body[key])
         return str(body)[:300]
 
-    def request(self, method, path, *, params=None, json=None, ok=(200, 201, 202, 204)):
+    def request(self, method, path, *, params=None, json=None, ok=(200, 201, 202, 204, 207), headers=None):
         method = method.upper()
         idempotent = method in IDEMPOTENT
         url = f"{self.base_url}{path}"
@@ -151,9 +151,10 @@ class ApiClient:
                 raise Interrupted()
             if self.limiter is not None:
                 self._sleep(self.limiter.wait_time())
-            headers = {"Authorization": f"Bearer {self.token.get()}", "Accept": "application/json"}
+            all_headers = {**(headers or {}), "Authorization": f"Bearer {self.token.get()}",
+                           "Accept": "application/json"}
             try:
-                resp = self.session.request(method, url, params=params, json=json, headers=headers,
+                resp = self.session.request(method, url, params=params, json=json, headers=all_headers,
                                             timeout=self.timeout)
             except requests.ConnectTimeout:
                 error = ConnectorError("Connection timed out", retryable=True)

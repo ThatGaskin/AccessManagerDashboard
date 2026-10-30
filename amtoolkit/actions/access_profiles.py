@@ -46,7 +46,8 @@ class CreateAccessProfiles(Action):
         Column("name", True, f"Unique access profile name (max {MAX_NAME} characters).", "Finance - Read"),
         Column("description", False, "Shown to requesters in the access request UI.",
                "Read access to finance shares"),
-        Column("owner", True, "Owner identity: email, username (alias) or identity ID.", "alice@example.com"),
+        Column("owner", True, "Owner identity: email, username (alias) or identity ID. Must be a person — "
+               "governance groups cannot own access profiles (use them as approvers).", "alice@example.com"),
         Column("source", True, "Source name exactly as it appears in the tenant.", "Active Directory"),
         Column("entitlements", True, "Entitlement names or values on that source, separated by ';'.",
                "Finance-Read;VPN Users"),
@@ -54,7 +55,7 @@ class CreateAccessProfiles(Action):
         Column("enabled", False, "yes/no — default yes.", "yes"),
         Column("approval_schemes", False,
                "Approvers in order, separated by ';': manager, owner, source_owner, app_owner, "
-               "governance_group:<id>. Blank = no approval.", "manager;owner"),
+               "governance_group:<group name or ID>. Blank = no approval.", "manager;governance_group:Finance Approvers"),
         Column("comments_required", False, "yes/no — requester must comment. Default no.", "no"),
         Column("denial_comments_required", False, "yes/no — approver must comment on denial. Default no.", "no"),
     ]
@@ -93,14 +94,15 @@ class CreateAccessProfiles(Action):
         for part in split_list(row.get("approval_schemes")):
             low = part.lower().replace(" ", "_")
             if low.startswith("governance_group:"):
-                group_id = part.split(":", 1)[1].strip()
-                if group_id:
-                    schemes.append({"approverType": "GOVERNANCE_GROUP", "approverId": group_id})
-                    continue
+                group = _resolve_group(ctx, part.split(":", 1)[1].strip(), m)
+                if group:
+                    schemes.append({"approverType": "GOVERNANCE_GROUP", "approverId": group["id"]})
+                continue
             if low in APPROVER_TYPES:
                 schemes.append({"approverType": APPROVER_TYPES[low], "approverId": None})
             else:
-                m.append(msg("error", f"Unknown approver '{part}'", "approval_schemes", "invalid"))
+                m.append(msg("error", f"Unknown approver '{part}'. Use manager, owner, source_owner, app_owner or "
+                                      "governance_group:<name>", "approval_schemes", "invalid"))
         if flags.get("requestable") and not schemes:
             m.append(msg("warning", "Requestable without approval: requests are granted automatically",
                          "approval_schemes"))
@@ -109,8 +111,7 @@ class CreateAccessProfiles(Action):
         if not row.get("owner"):
             m.append(msg("error", "Owner is required", "owner", "required"))
         else:
-            owner = _lookup_one(ctx, "identity", row["owner"], lambda: c.find_identities(row["owner"]),
-                                "owner", "Owner", m)
+            owner = _resolve_owner(ctx, row["owner"], m)
         if not row.get("source"):
             m.append(msg("error", "Source is required", "source", "required"))
         else:
@@ -193,6 +194,52 @@ class CreateAccessProfiles(Action):
         if item["status"] == "succeeded" and item.get("remote_id"):
             return {"id": item["remote_id"], "name": item["payload"]["name"]}
         return None
+
+
+def _resolve_owner(ctx, ref, m):
+    """Owners of access profiles are identities. Explains the rule when a governance group is given."""
+    before = len(m)
+    owner = _lookup_one(ctx, "identity", ref, lambda: ctx.connector.find_identities(ref), "owner", "Owner", m)
+    if owner is None and len(m) > before and m[-1]["code"] == "not_found":
+        try:
+            groups = ctx.cached(("governance_group", ref.lower()), lambda: ctx.connector.find_governance_groups(ref))
+        except ConnectorError:
+            groups = []
+        if groups:
+            m[-1] = msg("error", f"'{ref}' is a governance group. Access profile owners must be individual identities; "
+                                 f"set a person as owner and add the group as an approver "
+                                 f"(approval_schemes: governance_group:{groups[0]['name']}).", "owner",
+                        "owner_is_group")
+    return owner
+
+
+def _resolve_group(ctx, ref, m, field_name="approval_schemes"):
+    if not ref:
+        m.append(msg("error", "governance_group: needs a group name or ID", field_name, "invalid"))
+        return None
+    try:
+        found = ctx.cached(("governance_group", ref.lower()), lambda: ctx.connector.find_governance_groups(ref))
+    except (AuthError, ConfigError):
+        raise
+    except ConnectorError as exc:
+        m.append(msg("error", f"Could not look up governance group '{ref}': {exc}", field_name, "lookup_failed"))
+        return None
+    if not found:
+        m.append(msg("error", f"Governance group '{ref}' does not exist. Create it first — use "
+                              f"\"Create missing governance groups\" on this job — or correct the name.",
+                     field_name, "gg_missing", value=ref))
+        return None
+    if len(found) > 1:
+        m.append(msg("error", f"Governance group '{ref}' matches {len(found)} groups; use its ID", field_name,
+                     "ambiguous"))
+        return None
+    group = found[0]
+    if group.get("member_count") == 0:
+        m.append(msg("warning", f"Governance group '{group['name']}' has no members, so approvals assigned to it "
+                                "can never be completed", field_name, "gg_empty"))
+    else:
+        m.append(msg("info", f"Approver group '{group['name']}' ({group['id']})", field_name))
+    return group
 
 
 def _lookup_one_or_none(ctx, name, m):

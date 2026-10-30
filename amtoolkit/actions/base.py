@@ -56,8 +56,11 @@ class ItemFailed(Exception):
         self.in_doubt = in_doubt
 
 
-def msg(level, text, field_name=None, code=None):
-    return {"level": level, "text": text, "field": field_name, "code": code}
+def msg(level, text, field_name=None, code=None, value=None):
+    m = {"level": level, "text": text, "field": field_name, "code": code}
+    if value is not None:
+        m["value"] = value  # the unresolved reference, e.g. a missing governance group name
+    return m
 
 
 class PlanContext:

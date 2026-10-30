@@ -85,7 +85,7 @@ function download(url) { window.location.href = url; }
 // ------------------------------------------------------------------ router
 const routes = [
   [/^#?\/?$/, renderJobs],
-  [/^#\/new$/, renderNewJob],
+  [/^#\/new(?:\?action=([\w.]+))?$/, renderNewJob],
   [/^#\/connections$/, renderConnections],
   [/^#\/jobs\/([\w-]+)$/, renderJob],
 ];
@@ -98,7 +98,7 @@ async function route() {
   document.querySelectorAll("[data-nav]").forEach((a) => {
     const nav = a.dataset.nav;
     a.classList.toggle("active", (nav === "jobs" && (hash === "#/" || hash.startsWith("#/jobs"))) ||
-      hash === "#/" + nav);
+      hash.split("?")[0] === "#/" + nav);
   });
   for (const [re, fn] of routes) {
     const m = hash.match(re);
@@ -115,7 +115,7 @@ async function renderJobs() {
     h("tbody", {}, jobs.map((j) => {
       const c = j.counts;
       return h("tr", { class: "clickable", onclick: () => { location.hash = `#/jobs/${j.id}`; } },
-        h("td", {}, h("strong", {}, j.name), j.parent_job_id ? h("div", { class: "small muted" }, "rollback job") : null),
+        h("td", {}, h("strong", {}, j.name), j.parent_job_id ? h("div", { class: "small muted" }, "follow-up job") : null),
         h("td", {}, j.action_title),
         h("td", {}, j.connection.name, " ", envBadge(j.connection.environment)),
         h("td", {}, badge(j.status), j.status === "paused" && !j.approved ? h("div", { class: "small muted" }, "needs approval") : null),
@@ -136,7 +136,22 @@ async function renderJobs() {
 }
 
 // ------------------------------------------------------------------ new job
-async function renderNewJob() {
+// Guidance shown next to the CSV format, so the rules about owners and governance groups are visible
+// before anyone prepares a file.
+const ACTION_NOTES = {
+  "access_profile.create": [
+    "Owners: an access profile is owned by one person. Put an identity (email, username or ID) in the owner column — governance groups cannot own access profiles.",
+    "Approvers: to let a team approve requests, add governance_group:<group name> to approval_schemes, e.g. manager;governance_group:Finance Approvers. The plan checks that each group exists and warns when it has no members.",
+    "Missing groups: if a referenced group does not exist, the row is flagged and the job offers “Create missing governance groups”, which prepares a separate job for you to review and approve. Re-plan this job once the groups exist.",
+  ],
+  "governance_group.create": [
+    "A governance group is a team of identities used as approvers and reviewers. It has one owner (a person) and any number of members.",
+    "A group without members cannot complete approvals; the plan warns about this.",
+    "Reference new groups from access profiles with approval_schemes = governance_group:<group name>.",
+  ],
+};
+
+async function renderNewJob(presetAction) {
   const conns = await api("GET", "/api/connections");
   if (!conns.length) {
     view.replaceChildren(h("h1", {}, "New bulk job"), h("div", { class: "panel empty" },
@@ -144,7 +159,7 @@ async function renderNewJob() {
       " — start with a Sandbox connection to practise safely."));
     return;
   }
-  const actionSel = h("select", { name: "action" }, META.actions.map((a) => h("option", { value: a.key }, a.title)));
+  const actionSel = h("select", { name: "action" }, META.actions.map((a) => h("option", { value: a.key, selected: a.key === presetAction }, a.title)));
   const connSel = h("select", { name: "connection_id" }, conns.map((c) => h("option", { value: c.id }, `${c.name} (${c.environment})`)));
   const nameIn = h("input", { name: "name", placeholder: "e.g. Finance access profiles – Q4", maxlength: "200" });
   const fileIn = h("input", { type: "file", accept: ".csv,text/csv", hidden: true });
@@ -169,7 +184,9 @@ async function renderNewJob() {
       h("h2", {}, action.title), h("p", { class: "muted" }, action.description),
       h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Column"), h("th", {}, "Description"), h("th", {}, "Example"))),
         h("tbody", {}, action.columns.map((c) => h("tr", {}, h("td", { class: "mono" }, c.name, c.required ? " *" : ""), h("td", { class: "small" }, c.help), h("td", { class: "mono" }, c.example))))),
-      h("p", {}, h("a", { class: "btn", href: `/api/actions/${action.key}/template.csv` }, "Download CSV template")));
+      h("p", {}, h("a", { class: "btn", href: `/api/actions/${action.key}/template.csv` }, "Download CSV template")),
+      ACTION_NOTES[action.key] ? h("div", { class: "banner info" }, h("strong", {}, "Owners and governance groups"),
+        h("ul", { class: "notes" }, ACTION_NOTES[action.key].map((t) => h("li", {}, t)))) : null);
     const conn = conns.find((c) => c.id === connSel.value);
     prodWarn.replaceChildren(conn && conn.environment === "production" ? h("div", { class: "banner prod" }, "This connection is PRODUCTION. Nothing is changed until you review and approve the plan.") : "");
   };
@@ -338,7 +355,7 @@ async function renderJob(jobId) {
       a.resume && h("button", { class: "primary", onclick: () => doCommand("resume") }, "Resume"),
       a.pause && h("button", { onclick: () => doCommand("pause") }, "Pause"),
       a.retry_failed && h("button", { onclick: () => doCommand("retry-failed", `Queue ${c.status.failed} failed row(s) again?`) }, "Retry failed"),
-      a.rollback && h("button", { onclick: () => doCommand("rollback", `Create a rollback job that deletes the ${c.status.succeeded} profile(s) this job created? It will open in review; nothing is deleted until you approve and start it.`) }, "Create rollback…"),
+      a.rollback && h("button", { onclick: () => doCommand("rollback", `Create a rollback job that deletes the ${c.status.succeeded} item(s) this job created? It will open in review; nothing is deleted until you approve and start it.`) }, "Create rollback…"),
       a.cancel && h("button", { class: "danger", onclick: () => doCommand("cancel", "Cancel this job? Rows that already ran stay as they are; remaining rows will not run. This cannot be resumed.") }, "Cancel job"),
       h("button", { onclick: () => download(`/api/jobs/${jobId}/export.csv`) }, "Export CSV"),
       a.delete && h("button", { class: "danger", onclick: async () => {
@@ -355,11 +372,21 @@ async function renderJob(jobId) {
     if (j.status === "approved") banners.push(h("div", { class: "banner info" }, `Approved ${fmtTime(j.approved_at)}. Any edit will require approval again.`));
     if (j.status === "planning") banners.push(h("div", { class: "banner info" }, "Planning: looking up owners, sources, entitlements and existing profiles (read-only)…"));
     if (j.status === "pausing") banners.push(h("div", { class: "banner info" }, "Pausing after the current row finishes…"));
+    if (j.missing_governance_groups.length) banners.push(h("div", { class: "banner warn" },
+      `${j.missing_governance_groups.length} governance group(s) used as approvers do not exist yet: `,
+      h("strong", {}, j.missing_governance_groups.join(", ")), ". Create them in a separate job (reviewed and approved like any other), then Re-plan this job. ",
+      a.create_groups ? h("button", { onclick: () => missingGroupsDialog(j) }, "Create missing governance groups…") : null));
+    if (j.parent && j.action === "governance_group.create" && j.parent.action === "access_profile.create" && j.status === "completed") {
+      const canReplan = ["review", "approved", "paused"].includes(j.parent.status);
+      banners.push(h("div", { class: "banner info" }, "Groups are ready. Re-plan ", h("a", { href: `#/jobs/${j.parent.id}` }, j.parent.name),
+        " so its rows pick them up. ",
+        canReplan ? h("button", { onclick: () => guarded(async () => { await api("POST", `/api/jobs/${j.parent.id}/plan`); location.hash = `#/jobs/${j.parent.id}`; }) }, "Re-plan that job now") : null));
+    }
 
     header.replaceChildren(h("div", { class: "panel" },
       h("div", { class: "row spread" },
         h("div", {}, h("h1", {}, j.name), h("div", { class: "muted small" }, `${j.action_title} · `, j.connection.name, " ", envBadge(j.connection.environment), j.source_file ? ` · ${j.source_file}` : "", ` · created ${fmtTime(j.created_at)}`,
-          j.parent_job_id ? h("span", {}, " · rollback of ", h("a", { href: `#/jobs/${j.parent_job_id}` }, "parent job")) : null)),
+          j.parent ? h("span", {}, " · created from ", h("a", { href: `#/jobs/${j.parent.id}` }, j.parent.name)) : null)),
         badge(j.status)),
       h("div", { class: "stepper" }, steps.map(([label], i) => h("div", { class: "step " + (i < currentIdx || j.status === "completed" ? "done" : i === currentIdx ? "current" : "") }, label))),
       banners,
@@ -522,6 +549,36 @@ async function itemDialog(jobId, itemId, state, onChange) {
   render();
 }
 
+// ------------------------------------------------------------------ governance groups
+function missingGroupsDialog(job) {
+  const owner = h("input", { placeholder: "e.g. alice@example.com", autocomplete: "off" });
+  const members = h("input", { placeholder: "optional, e.g. alice@example.com;carol", autocomplete: "off" });
+  const description = h("input", { value: `Approvers for access profiles in '${job.name}'`, maxlength: "500" });
+  openModal(h("h2", {}, "Create missing governance groups"),
+    h("p", {}, "This prepares a new ", h("strong", {}, "Create governance groups"), " job for:"),
+    h("ul", {}, job.missing_governance_groups.map((n) => h("li", {}, n))),
+    h("div", { class: "banner info" }, "Nothing is created yet. The new job opens in review: you can set a different owner or members per group, then approve and start it. Afterwards, re-plan this access profile job."),
+    h("label", { class: "field" }, h("span", {}, "Owner for the new groups *", h("div", { class: "help" }, "One person (email, username or identity ID). Groups cannot be owned by another group.")), owner),
+    h("label", { class: "field" }, h("span", {}, "Members", h("div", { class: "help" }, "Identities separated by ';'. Groups without members cannot complete approvals — you can also add members per group in review.")), members),
+    h("label", { class: "field" }, h("span", {}, "Description"), description),
+    h("div", { class: "modal-actions" }, h("button", { onclick: closeModal }, "Cancel"),
+      h("button", { class: "primary", onclick: () => guarded(async () => {
+        const res = await api("POST", `/api/jobs/${job.id}/missing-governance-groups`, { owner: owner.value, members: members.value, description: description.value });
+        closeModal(); toast("Governance group job created — review it, then approve and start"); location.hash = `#/jobs/${res.id}`;
+      }) }, "Prepare job")));
+  owner.focus();
+}
+
+function changeSummary(p) {
+  if (!p) return "";
+  if (p.entitlements) {
+    const groups = (p.accessRequestConfig.approvalSchemes || []).filter((a) => a.approverType === "GOVERNANCE_GROUP").length;
+    return `${p.entitlements.length} entitlement(s) · owner ${p.owner.name || p.owner.id}` + (groups ? ` · ${groups} approver group(s)` : "");
+  }
+  if (p.group) return `owner ${p.group.owner.name || p.group.owner.id} · ${p.members.length} member(s)`;
+  return p.id ? p.id : "";
+}
+
 // ------------------------------------------------------------------ approval
 async function approveDialog(jobId, onDone) {
   const p = await guarded(() => api("GET", `/api/jobs/${jobId}/approval`));
@@ -533,7 +590,7 @@ async function approveDialog(jobId, onDone) {
     h("div", { class: "stats" }, ops, h("div", { class: "stat" }, h("b", {}, p.excluded), h("span", { class: "muted small" }, "excluded")), h("div", { class: "stat" }, h("b", {}, p.warnings), h("span", { class: "muted small" }, "with warnings"))),
     h("h3", {}, `First ${p.sample.length} of ${p.total_changes} change(s)`),
     h("table", {}, h("tbody", {}, p.sample.map((s) => h("tr", {}, h("td", { class: "mono" }, s.row_no), h("td", {}, badge(s.op)), h("td", {}, s.target),
-      h("td", { class: "small muted" }, s.payload && s.payload.entitlements ? `${s.payload.entitlements.length} entitlement(s) · owner ${s.payload.owner.name || s.payload.owner.id}` : ""))))),
+      h("td", { class: "small muted" }, changeSummary(s.payload)))))),
     h("p", { class: "small muted" }, "Approval is bound to plan fingerprint ", h("span", { class: "mono" }, p.fingerprint.slice(0, 12)), ". If anything changes after this, you will have to approve again."),
     confirmInput ? h("label", { class: "field" }, h("span", {}, `Type ${p.requires_confirmation_text} to confirm`), confirmInput) : null,
     h("div", { class: "modal-actions" }, h("button", { onclick: closeModal }, "Back"),
