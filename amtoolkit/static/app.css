@@ -190,3 +190,8 @@ table.copy input.override { font-size: 12px; padding: 3px 6px; }
 .new-attrs ul { list-style: none; margin: 4px 0 0; padding: 0; }
 .new-attrs li { padding: 2px 0; }
 .new-attrs .badge { margin-left: 6px; }
+.compare-tools { flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.compare-tools .compare-search { max-width: 260px; }
+.compare-tools .compare-attr { max-width: 280px; }
+.pager { gap: 6px; margin: 8px 0; justify-content: flex-end; }
+@media (max-width: 640px) { .compare-tools .compare-search, .compare-tools .compare-attr { max-width: none; flex: 1 1 100%; } }

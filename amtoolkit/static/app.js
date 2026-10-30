@@ -1359,10 +1359,21 @@ function historyDialog({ type, title, attribute, sides }) {
   });
 }
 
+const COMPARE_PAGE = 50; // objects per page of a comparison
+const ONLY_IN_TARGET_SHOWN = 30;
+const fmtN = (n) => Number(n || 0).toLocaleString();
+
 async function renderCompare(compareId) {
   const picked = new Map(); // source_id -> Set of attributes (empty set for new objects)
   const openNew = new Set(); // new objects whose attribute list is expanded, kept open across redraws
-  let filter = "changes";
+  let filter = "changes", query = "", attrFilter = "", page = 0, initialized = false, current = null;
+  // A scan can hold thousands of objects: they are filtered by name and by differing attribute, and shown a
+  // page at a time. These inputs survive redraws so typing and focus are not lost.
+  const searchIn = h("input", { type: "search", placeholder: "Filter by name…", autocomplete: "off", spellcheck: "false", class: "compare-search" });
+  let searchTimer = null;
+  searchIn.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { query = searchIn.value.trim().toLowerCase(); page = 0; draw(current); }, 200); });
+  const attrSel = h("select", { class: "compare-attr", onchange: () => { attrFilter = attrSel.value; page = 0; draw(current); } });
+  const nameIn = h("input", { maxlength: "200", style: "max-width:420px" });
   // A mark applies to the attribute in every object of the comparison: marked environment-specific, it is
   // unticked everywhere; unmarked, it is ticked wherever it differs in an object that is selected.
   const remark = (r, { attr, label }, res) => {
@@ -1379,47 +1390,87 @@ async function renderCompare(compareId) {
     draw(r);
   };
   const draw = (r) => {
+    current = r;
+    const focused = document.activeElement;
     const running = r.status === "running";
     const counts = { new: 0, different: 0, same: 0, ambiguous: 0 };
     r.rows.forEach((row) => { counts[row.status] += 1; });
     const typeLabel = (r.type_label || "").toLowerCase() + "s";
     const header = [
       h("div", { class: "row spread" },
-        h("div", {}, h("h1", {}, `Compare ${typeLabel}`), h("div", { class: "small muted" }, r.source.name, " ", envBadge(r.source.environment), " → ", r.target.name, " ", envBadge(r.target.environment), ` · ${fmtTime(r.created_at)} · scanned ${r.scanned} object(s)`)),
+        h("div", {}, h("h1", {}, `Compare ${typeLabel}`), h("div", { class: "small muted" }, r.source.name, " ", envBadge(r.source.environment), " → ", r.target.name, " ", envBadge(r.target.environment), ` · ${fmtTime(r.created_at)} · scanned ${fmtN(r.scanned)} object(s)`)),
         h("div", { class: "row" }, r.status === "completed" ? h("a", { class: "btn", href: `/api/compare/${compareId}/export.csv` }, "Download CSV") : null,
           experimentalBadge(), badge(r.status, r.status === "completed" ? "b-ok" : r.status === "failed" ? "b-err" : "b-info"))),
       r.error ? h("div", { class: "banner err" }, r.error) : null,
       running ? h("div", { class: "banner info" }, "Reading both environments (read-only)… ", h("button", { onclick: () => guarded(async () => { await api("POST", `/api/compare/${compareId}/cancel`); }) }, "Cancel")) : null,
     ];
     if (r.status !== "completed") { showView(header); return; }
-    if (!picked.size) {
-      r.rows.forEach((row) => {
-        if (row.status === "different") picked.set(row.source_id, new Set(row.diffs.filter((d) => !d.env_specific && !d.only_in_target).map((d) => d.attr)));
-      });
+    const defaults = (row) => new Set(row.diffs.filter((d) => !d.env_specific && !d.only_in_target).map((d) => d.attr));
+    if (!initialized) {
+      initialized = true;
+      r.rows.forEach((row) => { if (row.status === "different") picked.set(row.source_id, defaults(row)); });
     }
-    const visible = r.rows.filter((row) => filter === "all" || (filter === "changes" ? ["new", "different"].includes(row.status)
-      : filter === "entitlements" ? row.entitlements_differ : filter === "newer" ? row.newer === "target" : row.status === filter));
+    const byId = new Map(r.rows.map((row) => [row.source_id, row]));
+    // How many objects differ in each attribute, for the attribute filter
+    const attrCounts = new Map();
+    r.rows.forEach((row) => {
+      if (row.status !== "different") return;
+      row.diffs.forEach((d) => { if (!d.same) { const c = attrCounts.get(d.attr) || { label: d.label, n: 0 }; c.n += 1; attrCounts.set(d.attr, c); } });
+    });
+    if (attrFilter && !attrCounts.has(attrFilter)) attrFilter = "";
+    attrSel.replaceChildren(h("option", { value: "" }, "Any attribute"),
+      ...[...attrCounts.entries()].sort((a, b) => b[1].n - a[1].n || a[1].label.localeCompare(b[1].label))
+        .map(([attr, c]) => h("option", { value: attr, selected: attr === attrFilter }, `${c.label} differs (${fmtN(c.n)})`)));
+    attrSel.hidden = !attrCounts.size;
+    const differsIn = (row, attr) => row.status === "different" && row.diffs.some((d) => d.attr === attr && !d.same);
+    const visible = r.rows.filter((row) => (filter === "all" || (filter === "changes" ? ["new", "different"].includes(row.status)
+      : filter === "entitlements" ? row.entitlements_differ : filter === "newer" ? row.newer === "target" : row.status === filter))
+      && (!query || row.name.toLowerCase().includes(query)) && (!attrFilter || differsIn(row, attrFilter)));
+    const pages = Math.max(1, Math.ceil(visible.length / COMPARE_PAGE));
+    page = Math.min(page, pages - 1);
+    const shown = visible.slice(page * COMPARE_PAGE, (page + 1) * COMPARE_PAGE);
     const newerCount = r.rows.filter((row) => row.newer === "target").length;
-    const chip = (k, l, n) => h("button", { class: "chip" + (filter === k ? " active" : ""), onclick: () => { filter = k; draw(r); } }, `${l} (${n})`);
+    const chip = (k, l, n) => h("button", { class: "chip" + (filter === k ? " active" : ""), onclick: () => { filter = k; page = 0; draw(r); } }, `${l} (${fmtN(n)})`);
     const chosen = [...picked.entries()].filter(([id, attrs]) => {
-      const row = r.rows.find((x) => x.source_id === id);
+      const row = byId.get(id);
       return row && (row.status === "new" || attrs.size);
     });
-    const nameIn = h("input", { placeholder: `Copy ${typeLabel} from ${r.source.name} to ${r.target.name}`, maxlength: "200", style: "max-width:420px" });
+    nameIn.placeholder = `Copy ${typeLabel} from ${r.source.name} to ${r.target.name}`;
+    // Select or unselect every object the filters match, on all pages. With an attribute filter, only that
+    // attribute is ticked (or unticked).
+    const selectable = visible.filter((row) => ["new", "different"].includes(row.status));
+    const attrLabel = attrFilter ? attrCounts.get(attrFilter).label : "";
+    const selectAll = (on) => {
+      selectable.forEach((row) => {
+        if (row.status === "new") { if (on) picked.set(row.source_id, new Set()); else picked.delete(row.source_id); return; }
+        const set = picked.get(row.source_id) || new Set();
+        if (attrFilter) on ? set.add(attrFilter) : set.delete(attrFilter);
+        picked.set(row.source_id, attrFilter ? set : on ? defaults(row) : new Set());
+      });
+      draw(r);
+    };
+    const listTop = h("div");
+    const goTo = (p) => { page = p; draw(r); listTop.scrollIntoView({ block: "start" }); };
+    const pager = () => pages > 1 ? h("div", { class: "row pager small" },
+      h("button", { disabled: page === 0, onclick: () => goTo(0) }, "«"),
+      h("button", { disabled: page === 0, onclick: () => goTo(page - 1) }, "‹ Previous"),
+      h("span", {}, `Page ${fmtN(page + 1)} of ${fmtN(pages)}`),
+      h("button", { disabled: page >= pages - 1, onclick: () => goTo(page + 1) }, "Next ›"),
+      h("button", { disabled: page >= pages - 1, onclick: () => goTo(pages - 1) }, "»")) : null;
     const create = h("button", { class: "primary", disabled: !chosen.length, onclick: () => guarded(async () => {
       create.disabled = true;
       try {
         const res = await api("POST", `/api/compare/${compareId}/create-job`, { name: nameIn.value, selections: chosen.map(([id, attrs]) => ({ source_id: id, attributes: [...attrs] })) });
         location.hash = `#/jobs/${res.id}`;
       } finally { create.disabled = false; }
-    }) }, `Create copy job (${chosen.length})`);
+    }) }, `Create copy job (${fmtN(chosen.length)})`);
 
-    const rowsEl = visible.map((row) => {
+    const rowsEl = shown.map((row) => {
       const selectable = ["new", "different"].includes(row.status);
       const objBox = h("input", { type: "checkbox", disabled: !selectable, checked: picked.has(row.source_id) && (row.status === "new" || picked.get(row.source_id).size > 0),
         onchange: (e) => {
           if (!e.target.checked) picked.set(row.source_id, new Set());
-          else picked.set(row.source_id, new Set(row.status === "new" ? [] : row.diffs.filter((d) => !d.env_specific && !d.only_in_target).map((d) => d.attr)));
+          else picked.set(row.source_id, row.status === "new" ? new Set() : defaults(row));
           if (row.status === "new" && !e.target.checked) picked.delete(row.source_id);
           draw(r);
         } });
@@ -1474,19 +1525,27 @@ async function renderCompare(compareId) {
         h("div", { class: "stats scan-summary" }, [[`In ${r.source.name}`, r.summary.in_source], [`In ${r.target.name}`, r.summary.in_target], [`New in ${r.target.name}`, r.summary.new],
           ["Different", r.summary.different], ["Same", r.summary.same], [`Only in ${r.target.name}`, r.summary.only_in_target],
           ...(r.type === "source" ? [["Entitlements differ", r.summary.entitlements_differ]] : []), [`Changed more recently in ${r.target.name}`, newerCount]]
-          .map(([l, n]) => h("div", { class: "stat" }, h("b", {}, n), h("span", { class: "muted small" }, l)))),
+          .map(([l, n]) => h("div", { class: "stat" }, h("b", {}, fmtN(n)), h("span", { class: "muted small" }, l)))),
         r.entitlements_incomplete ? h("div", { class: "banner warn small" }, "More entitlements than the scan reads (20,000 per environment): the entitlement comparison is incomplete.") : null,
         h("div", { class: "chips" }, chip("changes", "To copy", counts.new + counts.different), chip("new", "New", counts.new), chip("different", "Different", counts.different),
           chip("same", "Same", counts.same), r.type === "source" ? chip("entitlements", "Entitlements differ", r.summary.entitlements_differ) : null,
           newerCount ? chip("newer", `Changed more recently in ${r.target.name}`, newerCount) : null,
           counts.ambiguous ? chip("ambiguous", "Ambiguous", counts.ambiguous) : null, chip("all", "All", r.rows.length)),
-        r.only_in_target.length ? h("p", { class: "small muted" }, `Only in ${r.target.name} (left alone): ${r.only_in_target.join(", ")}`) : null,
+        r.only_in_target.length ? h("p", { class: "small muted" }, `Only in ${r.target.name} (left alone): ${r.only_in_target.slice(0, ONLY_IN_TARGET_SHOWN).join(", ")}`,
+          r.only_in_target.length > ONLY_IN_TARGET_SHOWN ? ` … and ${fmtN(r.only_in_target.length - ONLY_IN_TARGET_SHOWN)} more (all of them are in the CSV)` : "") : null,
+        h("div", { class: "row compare-tools" }, searchIn, attrSel,
+          h("span", { class: "small muted" }, visible.length ? `${fmtN(page * COMPARE_PAGE + 1)}–${fmtN(page * COMPARE_PAGE + shown.length)} of ${fmtN(visible.length)}` : "0 of 0"),
+          selectable.length ? h("button", { onclick: () => selectAll(true) }, attrFilter ? `Tick ${attrLabel} in all ${fmtN(selectable.length)}` : `Select all ${fmtN(selectable.length)}`) : null,
+          selectable.length ? h("button", { onclick: () => selectAll(false) }, attrFilter ? `Untick ${attrLabel} in all ${fmtN(selectable.length)}` : `Unselect all ${fmtN(selectable.length)}`) : null),
         counts.different ? diffLegend(r.source.name, r.target.name) : null,
+        listTop, pager(),
         visible.length ? h("table", { class: "compare-list" }, h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Object"), h("th", {}, "Attributes"))), h("tbody", {}, rowsEl))
-          : h("div", { class: "empty" }, r.rows.length ? "Nothing in this filter" : `No ${typeLabel} in ${r.source.name}`)),
+          : h("div", { class: "empty" }, r.rows.length ? "Nothing matches these filters" : `No ${typeLabel} in ${r.source.name}`),
+        pager()),
       h("div", { class: "panel sticky-actions" },
         h("div", { class: "row" }, nameIn, create,
           h("span", { class: "small muted" }, `Creates a job on ${r.target.name}, planned read-only. Review every before → after, then approve.`))));
+    if ((focused === searchIn || focused === nameIn) && document.activeElement !== focused) focused.focus();
   };
   const load = async () => { const r = await api("GET", `/api/compare/${compareId}`); draw(r); return r.status === "running"; };
   if (await load()) pollTimer = setInterval(async () => { if (!(await load().catch(() => false))) { clearInterval(pollTimer); pollTimer = null; } }, 1000);
