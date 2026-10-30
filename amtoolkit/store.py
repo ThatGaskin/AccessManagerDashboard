@@ -297,6 +297,24 @@ class Store:
             return c.execute("UPDATE items SET status = 'pending', error = NULL, updated_at = ? WHERE job_id = ? "
                              "AND included = 1 AND status = 'failed'", (now_iso(), job_id)).rowcount
 
+    # ---------------------------------------------------------------- environment-specific marks
+    def env_marks(self):
+        """{object_type: {attribute: bool}}"""
+        out = {}
+        for r in self.db.query("SELECT object_type, attribute, env_specific FROM env_marks"):
+            out.setdefault(r["object_type"], {})[r["attribute"]] = bool(r["env_specific"])
+        return out
+
+    def set_env_mark(self, object_type, attribute, env_specific):
+        """Stores a mark; None removes it, so the built-in rules apply again."""
+        with self.db.tx() as c:
+            if env_specific is None:
+                c.execute("DELETE FROM env_marks WHERE object_type = ? AND attribute = ?", (object_type, attribute))
+            else:
+                c.execute("INSERT INTO env_marks (object_type, attribute, env_specific, updated_at) "
+                          "VALUES (?, ?, ?, ?) ON CONFLICT (object_type, attribute) DO UPDATE SET env_specific = excluded.env_specific, "
+                          "updated_at = excluded.updated_at", (object_type, attribute, int(env_specific), now_iso()))
+
     # ---------------------------------------------------------------- audit log
     def add_event(self, job_id, level, kind, message, item_id=None, data=None):
         # Every audit event also goes to the backend log, so one file tells the whole story.

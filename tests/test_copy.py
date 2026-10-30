@@ -457,3 +457,46 @@ def test_attribute_history_from_audit_events_and_toolkit_jobs(client, toolkit):
     assert len([e for e in history["tenant"] if e["values_known"]]) == 2
     everything = toolkit.object_history(prod["id"], "access_profile", payroll)
     assert any(e["action"] == "Create access profile" for e in everything["tenant"])
+
+
+def test_marking_an_attribute_environment_specific(toolkit, envs, client):
+    test, prod = envs
+    t = conn(toolkit, test)
+    ad = t.find_objects("source", "Active Directory")[0]["id"]
+    t.patch_object("source", ad, {"description": "Test AD", "config.pageSize": "1000"})
+    compare_id = toolkit.compare.start(test["id"], prod["id"], "source")
+    wait_for(lambda: toolkit.compare.get(compare_id)["status"] == "completed")
+
+    r = client.put("/api/env-marks", json={"object_type": "source", "attribute": "config.pageSize",
+                                           "env_specific": True})
+    assert r.status_code == 200 and r.get_json() == {"object_type": "source", "attribute": "config.pageSize",
+                                                     "env_specific": True, "marked": True}
+    client.put("/api/env-marks", json={"object_type": "source", "attribute": "cluster", "env_specific": False})
+    assert client.get("/api/env-marks").get_json() == [
+        {"object_type": "source", "attribute": "cluster", "env_specific": False},
+        {"object_type": "source", "attribute": "config.pageSize", "env_specific": True}]
+
+    # An earlier comparison picks the marks up, and so do new ones
+    for cid in (compare_id, toolkit.compare.start(test["id"], prod["id"], "source")):
+        result = wait_for(lambda: (r := toolkit.compare.get(cid))["status"] == "completed" and r)
+        row = next(r for r in result["rows"] if r["name"] == "Active Directory")
+        flags = {d["attr"]: (d["env_specific"], d["env_marked"]) for d in row["diffs"]}
+        assert flags["config.pageSize"] == (True, True) and flags["cluster"] == (False, True)
+        assert flags["description"] == (False, False)
+
+    # Plans keep a marked attribute unless it is named, and copy an unmarked one: here the cluster, whose
+    # name differs in production
+    req = toolkit.copy_request({"source_connection_id": test["id"], "connection_id": prod["id"],
+                                "object_type": "source", "object": "Active Directory"})
+    plan = toolkit.plan_copy(req)
+    assert plan.op == "error" and "Main VA cluster" in plan.messages[0]["text"]
+    toolkit.mark_env_specific("source", "cluster", True)
+    plan = toolkit.plan_copy(req)
+    assert plan.op == "update" and set(plan.payload["after"]) == {"description"}
+
+    # Marking it the built-in way removes the mark; secrets and unknown attributes cannot be marked
+    toolkit.mark_env_specific("source", "config.pageSize", False)
+    assert toolkit.env_marks() == []
+    for attr in ("config.password", "nonsense"):
+        assert client.put("/api/env-marks", json={"object_type": "source", "attribute": attr,
+                                                  "env_specific": True}).status_code == 400

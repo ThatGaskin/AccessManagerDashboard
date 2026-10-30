@@ -1090,7 +1090,12 @@ async function renderCopy() {
       return h("tr", { class: diffRowClass(d, ticked) },
         h("td", {}, box),
         h("td", {}, h("span", { class: "mono" }, d.label),
-          d.env_specific ? h("span", { class: "badge b-warn", title: "Usually differs per environment; left alone unless you tick it" }, "environment-specific") : null,
+          envMark(typeSel.value, d, (res) => {
+            d.env_specific = res.env_specific; d.env_marked = res.marked;
+            if (res.env_specific) { state.picked.delete(d.attr); delete state.overrides[d.attr]; }
+            else if (!d.same && !d.only_in_target) state.picked.add(d.attr);
+            draw();
+          }),
           d.only_in_target ? h("span", { class: "badge", title: `Not set in ${from}; moving it removes it from ${to}` }, `only in ${to}`) : null,
           locked ? h("span", { class: "badge" }, "required") : null,
           h("button", { class: "link hist", title: `When ${d.label} changed in ${from} and ${to}`, onclick: () => historyDialog({ type: typeSel.value, title: `${row.name} · ${d.label}`, attribute: d.attr,
@@ -1271,6 +1276,24 @@ function compareCells(d, ticked, isNew, override) {
 
 const diffRowClass = (d, ticked) => d.same ? "row-same" : ticked ? "row-move" : "row-diff";
 
+// The environment-specific badge of a compared attribute, and a button to mark it environment-specific (kept
+// in the target unless ticked) or not. The mark is saved for the object type and applies to every comparison,
+// copy and plan from then on; `done` gets the attribute's new classification.
+function envMark(type, d, done) {
+  const badgeEl = d.env_specific
+    ? h("span", { class: "badge b-warn", title: d.env_marked ? "You marked it environment-specific; left alone unless you tick it" : "Usually differs per environment; left alone unless you tick it" }, d.env_marked ? "environment-specific (marked)" : "environment-specific")
+    : d.env_marked ? h("span", { class: "badge", title: "You marked it as not environment-specific; it is copied like any other value" }, "not environment-specific (marked)") : null;
+  const button = h("button", { class: "link hist", title: d.env_specific
+      ? `Copy ${d.label} like any other value in every comparison of this type`
+      : `Keep ${d.label} as it is in the target in every comparison of this type, unless you tick it`,
+    onclick: () => guarded(async () => {
+      button.disabled = true;
+      try { done(await api("PUT", "/api/env-marks", { object_type: type, attribute: d.attr, env_specific: !d.env_specific })); }
+      finally { button.disabled = false; }
+    }) }, d.env_specific ? "not environment-specific" : "mark environment-specific");
+  return [badgeEl, button];
+}
+
 function diffLegend(from, to) {
   return h("div", { class: "legend small muted" },
     h("span", {}, h("span", { class: "mark same" }, "="), " same"),
@@ -1338,7 +1361,23 @@ function historyDialog({ type, title, attribute, sides }) {
 
 async function renderCompare(compareId) {
   const picked = new Map(); // source_id -> Set of attributes (empty set for new objects)
+  const openNew = new Set(); // new objects whose attribute list is expanded, kept open across redraws
   let filter = "changes";
+  // A mark applies to the attribute in every object of the comparison: marked environment-specific, it is
+  // unticked everywhere; unmarked, it is ticked wherever it differs in an object that is selected.
+  const remark = (r, { attr, label }, res) => {
+    r.rows.forEach((row) => {
+      const d = row.diffs.find((x) => x.attr === attr);
+      if (!d) return;
+      d.env_specific = res.env_specific; d.env_marked = res.marked;
+      const set = picked.get(row.source_id);
+      if (row.status !== "different" || !set) return;
+      if (res.env_specific) set.delete(attr);
+      else if (set.size && !d.same && !d.only_in_target) set.add(attr);
+    });
+    toast(`${res.env_specific ? "Marked" : "Unmarked"} ${label} as environment-specific for all ${(r.type_label || "").toLowerCase()}s`);
+    draw(r);
+  };
   const draw = (r) => {
     const running = r.status === "running";
     const counts = { new: 0, different: 0, same: 0, ambiguous: 0 };
@@ -1395,13 +1434,18 @@ async function renderCompare(compareId) {
               e.target.checked ? set.add(d.attr) : set.delete(d.attr);
               picked.set(row.source_id, set); draw(r);
             } })),
-            h("td", {}, h("span", { class: "mono" }, d.label), d.env_specific ? h("span", { class: "badge b-warn", title: "Usually differs per environment; kept unless you tick it" }, "environment-specific") : null,
+            h("td", {}, h("span", { class: "mono" }, d.label), envMark(r.type, d, (res) => remark(r, d, res)),
               d.only_in_target ? h("span", { class: "badge", title: "Not set in the source; copying removes it from the target" }, "only in target") : null),
             compareCells(d, attrs.has(d.attr), false)))));
       } else if (row.status === "new") {
         const kept = row.diffs.filter((d) => d.env_specific).map((d) => d.label);
         detail = h("div", { class: "small muted" }, `Not in ${r.target.name} — will be created with all copyable attributes.`,
-          kept.length ? ` Not copied (environment-specific): ${kept.join(", ")}. To give them values for ${r.target.name}, copy it from the Copy page and fill in “Use instead”.` : "");
+          kept.length ? ` Not copied (environment-specific): ${kept.join(", ")}. To give them values for ${r.target.name}, copy it from the Copy page and fill in “Use instead”.` : "",
+          h("details", { class: "new-attrs", open: openNew.has(row.source_id), ontoggle: (e) => { e.target.open ? openNew.add(row.source_id) : openNew.delete(row.source_id); } },
+            h("summary", {}, `Attributes (${row.diffs.length})`),
+            h("ul", {}, row.diffs.map((d) => h("li", {}, h("span", { class: "mono" }, d.label),
+              d.required ? h("span", { class: "badge", title: "Needed to create it; copied even when environment-specific" }, "required") : null,
+              envMark(r.type, d, (res) => remark(r, d, res)))))));
       } else if (row.status === "ambiguous") {
         detail = h("div", { class: "small", style: "color:var(--err)" }, row.problem);
       }

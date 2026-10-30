@@ -10,7 +10,7 @@ import logging
 import threading
 from collections import OrderedDict
 
-from .actions.copy import COPY_TYPES, attr_specs, find_by_name
+from .actions.copy import COPY_TYPES, attr_specs, builtin_spec, find_by_name, with_mark
 from .connectors import model
 from .connectors.base import ConnectorError, Interrupted
 from .reports import MAX_PER_TYPE
@@ -44,6 +44,17 @@ def comparable(spec, obj, group_names, members=None):
     if spec.kind == "text":
         return value or ""
     return value
+
+
+def apply_marks(type_, rows):
+    """Brings the environment-specific flags of compared attributes up to date with the marks people set
+    since the comparison ran."""
+    for row in rows:
+        for d in row["diffs"]:
+            spec = builtin_spec(type_, d["attr"])
+            if spec is not None:
+                spec = with_mark(type_, spec)
+                d["env_specific"], d["env_marked"] = spec.env_specific, spec.marked
 
 
 def _same(a, b):
@@ -90,6 +101,7 @@ class CompareRunner:
             if result is None:
                 from .store import NotFound
                 raise NotFound("Comparison not found (comparisons are kept in memory until the toolkit restarts)")
+            apply_marks(result["type"], result["rows"])
             return dict(result)
 
     def cancel(self, compare_id):
@@ -214,7 +226,8 @@ def object_row(src, dst, type_, s, d, src_groups, dst_groups, include_same=False
         if equal and not include_same:
             continue
         row["diffs"].append({"attr": spec.name, "label": spec.label, "kind": spec.kind, "source": a, "target": b,
-                             "same": equal, "env_specific": spec.env_specific, "required": spec.required,
+                             "same": equal, "env_specific": spec.env_specific, "env_marked": spec.marked,
+                             "required": spec.required,
                              "only_in_target": spec.name.startswith("config.") and
                              spec.label not in (s.get("config") or {})})
     if d is not None:
