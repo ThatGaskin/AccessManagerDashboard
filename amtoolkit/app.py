@@ -7,10 +7,12 @@ and cross-origin requests are rejected. Secrets are never returned by the API.
 import getpass
 import hmac
 import logging
+import mimetypes
 import secrets
+from importlib import resources
 from pathlib import Path
 
-from flask import Flask, Response, abort, jsonify, request, send_from_directory
+from flask import Flask, Response, abort, jsonify, request
 
 from . import __version__
 from .actions import ACTIONS, get_action
@@ -21,7 +23,8 @@ from .service import Toolkit
 from .store import NotFound
 
 log = logging.getLogger(__name__)
-STATIC = Path(__file__).parent / "static"
+# Read through importlib.resources so the UI also loads when the package runs from a .pyz zip file.
+STATIC = resources.files(__package__) / "static"
 LOOPBACK = {"127.0.0.1", "localhost", "[::1]"}
 
 
@@ -102,9 +105,15 @@ def create_app(data_dir, *, allowed_hosts=None):
         html = (STATIC / "index.html").read_text("utf-8").replace("{{CSRF_TOKEN}}", csrf_token)
         return Response(html, mimetype="text/html")
 
-    @app.get("/static/<path:name>")
+    static_files = {f.name: f for f in STATIC.iterdir() if f.is_file() and f.name != "index.html"}
+
+    @app.get("/static/<name>")
     def static_file(name):
-        return send_from_directory(STATIC, name, max_age=0)
+        resource = static_files.get(name)
+        if resource is None:
+            abort(404)
+        mimetype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        return Response(resource.read_bytes(), mimetype=mimetype, headers={"Cache-Control": "no-cache"})
 
     # ------------------------------------------------------------------ meta
     @app.get("/api/meta")

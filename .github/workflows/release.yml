@@ -1,7 +1,7 @@
 name: Release
 
-# Push a tag like v0.2.0 to build the Windows .exe and publish a GitHub release.
-# Run it manually (Actions → Release → Run workflow) to build the .exe as a downloadable
+# Push a tag like v0.2.0 to build AccessManagerToolkit.pyz and publish a GitHub release.
+# Run it manually (Actions → Release → Run workflow) to get the file as a downloadable
 # artifact without publishing a release.
 on:
   push:
@@ -16,29 +16,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-windows:
-    name: Test and build Windows .exe
-    runs-on: windows-latest
+  build:
+    name: Test and build .pyz
+    runs-on: ubuntu-latest
     outputs:
       asset: ${{ steps.version.outputs.asset }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements*.txt
-
-      - name: Install dependencies
-        run: pip install -r requirements-build.txt -r requirements-dev.txt
-
-      - name: Run tests
-        run: python -m pytest -q
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
 
       - name: Check version
         id: version
-        shell: bash
         run: |
           VERSION=$(python -c "import amtoolkit; print(amtoolkit.__version__)")
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
@@ -51,63 +46,82 @@ jobs:
             LABEL="v$VERSION-dev.${GITHUB_SHA::7}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "asset=AccessManagerToolkit-$LABEL-windows-x64" >> "$GITHUB_OUTPUT"
+          echo "asset=AccessManagerToolkit-$LABEL.pyz" >> "$GITHUB_OUTPUT"
 
-      - name: Build executable
-        run: pyinstaller --clean --noconfirm packaging/amtoolkit.spec
-
-      - name: Smoke test executable
-        shell: pwsh
-        env:
-          EXPECTED_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          $data = Join-Path $env:RUNNER_TEMP "amt-smoke"
-          $proc = Start-Process -FilePath "dist\AccessManagerToolkit.exe" `
-            -ArgumentList "--no-browser", "--port", "8799", "--data-dir", $data -PassThru
-          $meta = $null
-          for ($i = 0; $i -lt 60 -and -not $meta; $i++) {
-            Start-Sleep -Seconds 1
-            try { $meta = Invoke-RestMethod -Uri "http://127.0.0.1:8799/api/meta" } catch { }
-          }
-          $page = if ($meta) { Invoke-WebRequest -Uri "http://127.0.0.1:8799/static/app.js" -UseBasicParsing } else { $null }
-          taskkill /PID $proc.Id /T /F | Out-Null
-          if (-not $meta) { throw "The executable did not start serving within 60 seconds" }
-          if ($meta.version -ne $env:EXPECTED_VERSION) { throw "Version mismatch: $($meta.version)" }
-          if ($page.StatusCode -ne 200) { throw "Static UI files are missing from the executable" }
-          if (-not (Test-Path (Join-Path $data "toolkit.db"))) { throw "Database was not created" }
-          Write-Host "Smoke test passed: version $($meta.version)"
-
-      - name: Package
-        shell: pwsh
+      - name: Build
         env:
           ASSET: ${{ steps.version.outputs.asset }}
         run: |
-          New-Item -ItemType Directory -Force out | Out-Null
-          Copy-Item "dist\AccessManagerToolkit.exe" "out\$env:ASSET.exe"
-          $hash = (Get-FileHash "out\$env:ASSET.exe" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $env:ASSET.exe" | Out-File -Encoding ascii -NoNewline "out\$env:ASSET.exe.sha256"
-          Get-Content "out\$env:ASSET.exe.sha256"
+          python packaging/build_pyz.py
+          mkdir out
+          cp dist/AccessManagerToolkit.pyz "out/$ASSET"
+          (cd out && sha256sum "$ASSET" > "$ASSET.sha256" && cat "$ASSET.sha256")
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.version.outputs.asset }}
+          name: pyz
           path: out/*
           if-no-files-found: error
           retention-days: 30
 
+  smoke-test:
+    name: Run .pyz on ${{ matrix.os }} (Python ${{ matrix.python }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: pyz
+      - name: Start it and check it serves the UI
+        shell: python
+        env:
+          ASSET: ${{ needs.build.outputs.asset }}
+          EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          import json, os, subprocess, sys, tempfile, time, urllib.request
+          data = tempfile.mkdtemp()
+          # -I: isolated mode, so only what is inside the .pyz can be imported.
+          proc = subprocess.Popen([sys.executable, "-I", os.environ["ASSET"], "--no-browser",
+                                   "--port", "8799", "--data-dir", data])
+          try:
+              meta = None
+              for _ in range(60):
+                  time.sleep(1)
+                  try:
+                      meta = json.load(urllib.request.urlopen("http://127.0.0.1:8799/api/meta"))
+                      break
+                  except OSError:
+                      if proc.poll() is not None:
+                          sys.exit(f"The toolkit exited with code {proc.returncode}")
+              assert meta, "The toolkit did not start serving within 60 seconds"
+              assert meta["version"] == os.environ["EXPECTED_VERSION"], meta["version"]
+              assert urllib.request.urlopen("http://127.0.0.1:8799/static/app.js").status == 200
+              assert os.path.exists(os.path.join(data, "toolkit.db")), "database not created"
+              print("Smoke test passed:", meta["version"])
+          finally:
+              proc.terminate()
+              proc.wait(30)
+
   publish:
     name: Publish GitHub release
     if: github.ref_type == 'tag'
-    needs: build-windows
+    needs: [build, smoke-test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: ${{ needs.build-windows.outputs.asset }}
+          name: pyz
           path: out
-
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -116,18 +130,18 @@ jobs:
           PRERELEASE=""
           if [[ "$TAG" == *-* ]]; then PRERELEASE="--prerelease"; fi
           cat > notes.md <<'NOTES'
-          ## Install (Windows)
+          ## Install
 
-          1. Download `AccessManagerToolkit-…-windows-x64.exe` below.
-          2. Optional: verify it — in PowerShell run `Get-FileHash <file>.exe` and compare with the `.sha256` file.
-          3. Double-click it. A console window opens and the toolkit opens in your browser at http://127.0.0.1:8765.
-             Keep the console window open while you work; press Ctrl+C in it to stop.
+          Needs Python 3.11 or newer (https://www.python.org/downloads/). Nothing else to install.
 
-          The executable is not code-signed, so Windows SmartScreen may show "Windows protected your PC".
-          Choose **More info → Run anyway** if the file hash matches.
+          1. Download `AccessManagerToolkit-….pyz` below (optionally check it against the `.sha256` file).
+          2. Run it — the toolkit opens in your browser at http://127.0.0.1:8765:
+             - Windows: `py AccessManagerToolkit-….pyz` (or double-click the file)
+             - macOS / Linux: `python3 AccessManagerToolkit-….pyz`
+          3. Keep the window open while you work; press Ctrl+C in it to stop.
 
-          Your jobs and audit log are stored in `%LOCALAPPDATA%\AccessManagerToolkit` and are kept when you
-          upgrade to a newer version.
+          Jobs and the audit log are stored in your user profile (Windows: `%LOCALAPPDATA%\AccessManagerToolkit`)
+          and are kept when you upgrade to a newer file.
           NOTES
           gh release create "$TAG" out/* --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "Access Manager Toolkit $TAG" --notes-file notes.md --generate-notes $PRERELEASE
