@@ -163,6 +163,10 @@ def create_app(data_dir, *, allowed_hosts=None):
     def update_connection(conn_id):
         return jsonify(toolkit.save_connection(body(), conn_id))
 
+    @app.post("/api/demo-environments")
+    def demo_environments():
+        return jsonify(toolkit.create_demo_environments()), 201
+
     @app.post("/api/connections/<conn_id>/confirm")
     def confirm_connection(conn_id):
         return jsonify(confirmer.connection_summary(conn_id))

@@ -318,7 +318,8 @@ async function renderConnections() {
   const secretLabel = { memory: ["secret in memory", "b-ok"], env: ["secret from env var", "b-ok"], missing: ["secret missing", "b-err"], not_required: ["no secret needed", ""] };
   view.replaceChildren(
     h("div", { class: "row spread" }, h("h1", {}, "Connections"),
-      h("div", { class: "row" }, META.connector_kinds.map((k) => h("button", { onclick: () => editConnection(null, k.kind) }, "Add " + k.label)))),
+      h("div", { class: "row" }, META.connector_kinds.map((k) => h("button", { onclick: () => editConnection(null, k.kind) }, "Add " + k.label)),
+        demoButton(conns.some((c) => c.name === "Demo Test") ? "Reset demo environments" : "Create demo environments"))),
     h("div", { class: "panel" }, conns.length ? h("table", {},
       h("thead", {}, h("tr", {}, ["Name", "Type", "Environment", "Credentials", ""].map((t) => h("th", {}, t)))),
       h("tbody", {}, conns.map((c) => h("tr", {},
@@ -1010,6 +1011,7 @@ function objectDropdown(placeholder, load, onChoose) {
     list.hidden = false;
   };
   input.addEventListener("focus", fill);
+  input.addEventListener("click", () => { if (list.hidden) fill(); }); // already focused: focus does not fire again
   input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(fill, 250); });
   input.addEventListener("keydown", (e) => {
     if (e.key === "ArrowDown" && !list.hidden && list.firstChild && list.firstChild.tabIndex === 0) { e.preventDefault(); list.firstChild.focus(); }
@@ -1020,11 +1022,24 @@ function objectDropdown(placeholder, load, onChoose) {
     clear: () => { input.value = ""; list.hidden = true; } };
 }
 
+// Two offline sandboxes, "Demo Test" and "Demo Prod", whose data differs on purpose. Running it again resets
+// them; nothing outside this computer is touched.
+function demoButton(label) {
+  return h("button", { title: "Two offline sandboxes with differing data: changed values, objects on one side only, different members and source settings, and a few things that cannot be copied",
+    onclick: () => guarded(async () => {
+      if (label.startsWith("Reset") && !window.confirm("Reset Demo Test and Demo Prod to their starting data? Changes made in them are lost (nothing outside this computer is affected).")) return;
+      const [test, prod] = await api("POST", "/api/demo-environments");
+      toast(`${label.startsWith("Reset") ? "Reset" : "Created"} ${test.name} and ${prod.name}`);
+      if (location.hash === "#/copy") route(); else location.hash = "#/copy";
+    }) }, label);
+}
+
 async function renderCopy() {
   const conns = await api("GET", "/api/connections");
   if (conns.length < 2) {
     showView(h("h1", {}, "Copy between environments"), h("div", { class: "panel empty" },
-      "Add two connections — e.g. your test and production tenants — to copy between them. ", h("a", { href: "#/connections" }, "Go to connections")));
+      h("p", {}, "Add two connections — e.g. your test and production tenants — to copy between them. ", h("a", { href: "#/connections" }, "Go to connections")),
+      h("p", {}, "Or try it first with two sandboxes whose data differs on purpose:"), demoButton("Create demo environments")));
     return;
   }
   const rank = { test: 0, sandbox: 1, production: 2 };
@@ -1071,14 +1086,14 @@ async function renderCopy() {
         override = h("input", { class: "override", value: state.overrides[d.attr] || "", placeholder: d.kind === "cluster" ? `cluster name in ${to}` : `value for ${to}` });
         override.addEventListener("change", () => { state.overrides[d.attr] = override.value.trim(); if (override.value.trim()) state.picked.add(d.attr); draw(); });
       }
-      return h("tr", { class: d.same ? "same" : "" },
+      const ticked = state.picked.has(d.attr) || locked;
+      return h("tr", { class: diffRowClass(d, ticked) },
         h("td", {}, box),
         h("td", {}, h("span", { class: "mono" }, d.label),
           d.env_specific ? h("span", { class: "badge b-warn", title: "Usually differs per environment; left alone unless you tick it" }, "environment-specific") : null,
           d.only_in_target ? h("span", { class: "badge", title: `Not set in ${from}; moving it removes it from ${to}` }, `only in ${to}`) : null,
           locked ? h("span", { class: "badge" }, "required") : null),
-        h("td", { class: "val" }, showValue(d.source)),
-        h("td", { class: "val" }, isNew ? h("span", { class: "muted" }, "—") : showValue(d.target), d.same ? h("div", { class: "small muted" }, "same") : null),
+        compareCells(d, ticked, isNew, state.overrides[d.attr]),
         h("td", {}, override));
     });
     const count = state.picked.size;
@@ -1094,8 +1109,9 @@ async function renderCopy() {
           differing.length ? h("div", { class: "row" },
             h("button", { onclick: () => { differing.forEach((d) => state.picked.add(d.attr)); draw(); } }, "Tick all differences"),
             h("button", { onclick: () => { state.picked.clear(); draw(); } }, "Untick all")) : null),
+        diffLegend(from, to),
         h("table", { class: "diff copy" },
-          h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Attribute"), h("th", {}, `In ${from}`), h("th", {}, `In ${to}`), h("th", {}, typeSel.value === "source" ? `Use instead in ${to}` : ""))),
+          h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Attribute"), h("th", {}, `In ${from}`), h("th", {}, ""), h("th", {}, `In ${to}`), h("th", {}, typeSel.value === "source" ? `Use instead in ${to}` : ""))),
           h("tbody", {}, rows)),
         row.secrets.length ? h("p", { class: "small muted" }, `Secrets are never copied: ${row.secrets.join(", ")}. Set them in ${to} directly.`) : null),
       h("div", { class: "panel sticky-actions" }, h("div", { class: "row" }, move,
@@ -1150,7 +1166,8 @@ async function renderCopy() {
 
   showView(
     h("div", { class: "row spread" }, h("div", { class: "row" }, h("h1", {}, "Copy between environments"), experimentalBadge()),
-      h("a", { href: "#/compare" }, "Compare all objects of a type →")),
+      h("div", { class: "row" }, demoButton(conns.some((c) => c.name === "Demo Test") ? "Reset demo environments" : "Create demo environments"),
+        h("a", { href: "#/compare" }, "Compare all objects of a type →"))),
     h("div", { class: "panel" }, h("div", { class: "copy-pick" },
       h("label", { class: "field" }, h("span", {}, "From"), fromSel),
       h("label", { class: "field" }, h("span", {}, "To ", h("span", { class: "help" }, "— changed")), toSel),
@@ -1208,6 +1225,57 @@ function showValue(v) {
   return String(v);
 }
 
+// Colour-coded comparison cells. Lists (entitlements, members, access profiles, approvers) are shown item
+// by item: + only in the source, − only in the target. The middle mark says = same, ≠ different (left
+// alone) or → will be moved; the target column then shows what it has now, struck through, and what it
+// will have.
+function valueChips(list, other, cls) {
+  const others = new Set(other || []);
+  if (!list || !list.length) return h("span", { class: "muted" }, "(none)");
+  return list.map((v) => others.has(v) ? h("span", { class: "vchip" }, v)
+    : h("span", { class: `vchip ${cls}`, title: cls === "add" ? "Only here" : cls === "remove" ? "Removed by the move" : "Only in the target" },
+      cls === "add" ? "+ " : cls === "remove" || cls === "extra" ? "− " : "", v));
+}
+
+function compareCells(d, ticked, isNew, override) {
+  const isList = Array.isArray(d.source) || Array.isArray(d.target);
+  const src = override !== undefined && override !== "" ? override : d.source;
+  const dst = isNew ? null : d.target;
+  const sourceCell = h("td", { class: "val" }, isList ? valueChips(d.source || [], dst || [], "add") : showValue(d.source));
+  const mark = d.same ? ["same", "=", "Same in both"] : ticked ? ["move", "→", "Will be moved"] : isNew ? ["off", "–", "Not copied"] : ["diff", "≠", "Different — left alone"];
+  const markCell = h("td", { class: "markcell" }, h("span", { class: `mark ${mark[0]}`, title: mark[2] }, mark[1]));
+  let target;
+  if (isNew) {
+    target = ticked ? h("ins", { class: "v" }, isList ? (src || []).join(", ") || "(none)" : showValue(src)) : h("span", { class: "muted" }, "—");
+  } else if (d.same) {
+    target = isList ? valueChips(dst || [], dst || [], "") : showValue(dst);
+  } else if (ticked) {
+    if (isList) {
+      const keep = new Set(src || []);
+      target = [...(dst || []).map((v) => keep.has(v) ? h("span", { class: "vchip" }, v) : h("span", { class: "vchip remove", title: "Removed by the move" }, "− ", v)),
+        ...(src || []).filter((v) => !(dst || []).includes(v)).map((v) => h("span", { class: "vchip add", title: "Added by the move" }, "+ ", v))];
+      if (!target.length) target = h("span", { class: "muted" }, "(none)");
+    } else {
+      target = [h("del", { class: "v" }, showValue(dst)), " ", h("ins", { class: "v" }, showValue(src))];
+    }
+  } else {
+    target = isList ? valueChips(dst || [], d.source || [], "extra") : showValue(dst);
+  }
+  return [sourceCell, markCell, h("td", { class: "val after" }, target)];
+}
+
+const diffRowClass = (d, ticked) => d.same ? "row-same" : ticked ? "row-move" : "row-diff";
+
+function diffLegend(from, to) {
+  return h("div", { class: "legend small muted" },
+    h("span", {}, h("span", { class: "mark same" }, "="), " same"),
+    h("span", {}, h("span", { class: "mark diff" }, "≠"), " different, left alone"),
+    h("span", {}, h("span", { class: "mark move" }, "→"), ` will be moved to ${to}`),
+    h("span", {}, h("span", { class: "vchip add" }, "+ "), ` only in ${from}`),
+    h("span", {}, h("span", { class: "vchip extra" }, "− "), ` only in ${to}`),
+    h("span", {}, h("del", { class: "v" }, "old"), " ", h("ins", { class: "v" }, "new"), ` value in ${to} after the move`));
+}
+
 async function renderCompare(compareId) {
   const picked = new Map(); // source_id -> Set of attributes (empty set for new objects)
   let filter = "changes";
@@ -1257,8 +1325,8 @@ async function renderCompare(compareId) {
       if (row.status === "different") {
         const attrs = picked.get(row.source_id) || new Set();
         detail = h("table", { class: "diff" },
-          h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Attribute"), h("th", {}, `In ${r.source.name}`), h("th", {}, `In ${r.target.name}`))),
-          h("tbody", {}, row.diffs.map((d) => h("tr", {},
+          h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Attribute"), h("th", {}, `In ${r.source.name}`), h("th", {}, ""), h("th", {}, `In ${r.target.name}`))),
+          h("tbody", {}, row.diffs.map((d) => h("tr", { class: diffRowClass(d, attrs.has(d.attr)) },
             h("td", {}, h("input", { type: "checkbox", checked: attrs.has(d.attr), onchange: (e) => {
               const set = picked.get(row.source_id) || new Set();
               e.target.checked ? set.add(d.attr) : set.delete(d.attr);
@@ -1266,7 +1334,7 @@ async function renderCompare(compareId) {
             } })),
             h("td", {}, h("span", { class: "mono" }, d.label), d.env_specific ? h("span", { class: "badge b-warn", title: "Usually differs per environment; kept unless you tick it" }, "environment-specific") : null,
               d.only_in_target ? h("span", { class: "badge", title: "Not set in the source; copying removes it from the target" }, "only in target") : null),
-            h("td", { class: "val" }, showValue(d.source)), h("td", { class: "val" }, showValue(d.target))))));
+            compareCells(d, attrs.has(d.attr), false)))));
       } else if (row.status === "new") {
         const kept = row.diffs.filter((d) => d.env_specific).map((d) => d.label);
         detail = h("div", { class: "small muted" }, `Not in ${r.target.name} — will be created with all copyable attributes.`,
@@ -1285,7 +1353,8 @@ async function renderCompare(compareId) {
         h("div", { class: "chips" }, chip("changes", "To copy", counts.new + counts.different), chip("new", "New", counts.new), chip("different", "Different", counts.different),
           chip("same", "Same", counts.same), counts.ambiguous ? chip("ambiguous", "Ambiguous", counts.ambiguous) : null, chip("all", "All", r.rows.length)),
         r.only_in_target.length ? h("p", { class: "small muted" }, `Only in ${r.target.name} (left alone): ${r.only_in_target.join(", ")}`) : null,
-        visible.length ? h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Object"), h("th", {}, "Attributes"))), h("tbody", {}, rowsEl))
+        counts.different ? diffLegend(r.source.name, r.target.name) : null,
+        visible.length ? h("table", { class: "compare-list" }, h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Object"), h("th", {}, "Attributes"))), h("tbody", {}, rowsEl))
           : h("div", { class: "empty" }, r.rows.length ? "Nothing in this filter" : `No ${typeLabel} in ${r.source.name}`)),
       h("div", { class: "panel sticky-actions" },
         h("div", { class: "row" }, nameIn, create,

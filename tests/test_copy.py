@@ -364,3 +364,41 @@ def test_new_object_gets_only_the_chosen_attributes_plus_required_ones(client, t
     created = conn(toolkit, prod).find_objects("access_profile", "Payroll")[0]
     assert (created["description"], created["owner"], created["requestable"]) == ("Test text", prod_id(BOB), True)
     assert toolkit.store.get_job(resp.get_json()["id"])["name"] == "Copy access profile Payroll from Test to Prod"
+
+
+# ---------------------------------------------------------------------------- demo environments
+def test_demo_environments_show_each_kind_of_difference(client, toolkit):
+    test, prod = toolkit.create_demo_environments()
+    assert (test["environment"], prod["environment"]) == ("test", "production")
+
+    def preview(type_, name):
+        return toolkit.copy_preview({"source_connection_id": test["id"], "connection_id": prod["id"],
+                                     "object_type": type_, "object": name})
+
+    def plan(type_, name, attributes=()):
+        req = toolkit.copy_request({"source_connection_id": test["id"], "connection_id": prod["id"],
+                                    "object_type": type_, "object": name, "attributes": list(attributes)})
+        return toolkit.plan_copy(req)
+
+    finance = {d["attr"]: d for d in preview("access_profile", "Finance - Read")["diffs"]}
+    assert not finance["description"]["same"] and finance["requestable"]["same"]
+    assert finance["entitlements"]["source"] == ["Finance-Read", "VPN Users"]
+    assert preview("access_profile", "HR - Read")["status"] == "same"
+    assert preview("access_profile", "Helpdesk Tools")["status"] == "new"
+    ad = {d["attr"]: d for d in preview("source", "Active Directory")["diffs"]}
+    assert ad["config.host"]["env_specific"] and not ad["config.pageSize"]["env_specific"]
+
+    assert plan("access_profile", "Finance - Read").op == "update"
+    assert plan("access_profile", "Helpdesk Tools").op == "create"
+    for name, problem in (("Sales - Write", "Tess Tester"), ("Cloud Admin", "Cloud-Admins"),
+                          ("IT Admin Access", "IT Approvers")):
+        result = plan("access_profile", name, ["owner"] if name == "Sales - Write" else ())
+        assert result.op == "error" and any(problem in m["text"] for m in result.messages), (name, result.messages)
+
+    # Running it again resets the demo data.
+    p = toolkit.connections.build(prod["id"])
+    ap = p.find_objects("access_profile", "Finance - Read")[0]
+    p.patch_object("access_profile", ap["id"], {"description": "changed"})
+    toolkit.create_demo_environments()
+    assert p.find_objects("access_profile", "Finance - Read")[0]["description"] == "Finance read"
+    assert len(toolkit.store.list_connections()) == 2

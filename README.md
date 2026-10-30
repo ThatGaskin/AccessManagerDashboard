@@ -235,6 +235,18 @@ access profiles, roles, governance groups and sources. No CSV involved. Like eve
    confirm — on production by typing the connection name. Nothing is sent before that, and if the target
    changed after you reviewed it, the move is refused and you see the new summary.
 
+**Try it on demo data first:** *Create demo environments* (on Copy or Connections) adds two offline
+sandboxes, *Demo Test* and *Demo Prod*, whose data differs on purpose — changed descriptions, owners and
+approvers, entitlements and members on one side only, objects that exist in only one environment, and
+source settings such as hosts and service accounts that differ per environment. A few cannot be copied
+as they are, to show what that looks like: *Sales - Write* is owned by a test-only account, *Cloud Admin*
+uses an entitlement production has not aggregated, and *IT Admin Access* is approved by a group that
+must be copied first. *Reset demo environments* puts both back to the start.
+
+The table is colour-coded: **=** same, **≠** different and left alone, **→** will be moved. List
+values are compared item by item (**+** only in the source, **−** only in the target), and the target
+column shows the current value struck through next to the value it will have after the move.
+
 Each move is recorded as a job, so it appears on **Jobs** with its audit log, and **Create rollback** on
 that job restores the previous values (or deletes an object the move created). To review many objects
 at once, *Compare all objects of a type* lists every new and different object of a type side by side and
