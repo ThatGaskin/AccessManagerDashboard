@@ -21,6 +21,7 @@ SEED = {
         {"id": "2c91808568c529c60168cca6f90c1302", "name": "Workday"},
         {"id": "2c91808568c529c60168cca6f90c1303", "name": "Salesforce"},
     ],
+    "clusters": [{"id": "2c9180887a1b2c3d017a1b2c3d4e0001", "name": "Main VA cluster"}],
     "entitlements": [],
     "access_profiles": [],
     "governance_groups": [
@@ -48,6 +49,18 @@ for _e in SEED["entitlements"]:
               privileged=_e["name"] in ("IT-Admins", "System Administrator", "Payroll Admin"), requestable=True)
 for _s in SEED["sources"]:
     _s["owner"] = dict(_GONE) if _s["name"] == "Workday" else dict(_ALICE)
+    _s.update(description=f"{_s['name']} accounts", deleteThreshold=10, authoritative=_s["name"] == "Workday")
+_VA = {"type": "CLUSTER", "id": "2c9180887a1b2c3d017a1b2c3d4e0001", "name": "Main VA cluster"}
+SEED["sources"][0].update(connector="active-directory", cluster=dict(_VA), connectorAttributes={
+    "host": "dc01.example.local", "port": "636", "useSSL": True, "user": "EXAMPLE\\svc-isc",
+    "password": "(secret)", "searchDNs": ["OU=Users,DC=example,DC=local"], "pageSize": "500",
+    "manageRecycleBin": False})
+SEED["sources"][1].update(connector="workday", connectorAttributes={
+    "url": "https://wd5-impl-services1.workday.com/ccx/service/example", "user": "ISU_ISC", "password": "(secret)",
+    "pageSize": "200", "includeFutureHires": True})
+SEED["sources"][2].update(connector="salesforce", connectorAttributes={
+    "url": "https://example.my.salesforce.com", "clientId": "3MVG9example", "clientSecret": "(secret)",
+    "apiVersion": "59.0"})
 SEED["access_profiles"].append({
     "id": "8f1e2d3c4b5a69788796a5b4c3d2e1f0", "name": "Legacy VPN", "description": None, "owner": dict(_GONE),
     "source": {"type": "SOURCE", "id": "2c91808568c529c60168cca6f90c1301", "name": "Active Directory"},
@@ -118,7 +131,8 @@ class MockTenant(Connector):
         self._delay()
         v = value.strip().lower()
         with _lock:
-            return [{"id": i["id"], "name": i["name"], "email": i["email"]} for i in self._state()["identities"]
+            return [{"id": i["id"], "name": i["name"], "email": i["email"], "alias": i["alias"]}
+                    for i in self._state()["identities"]
                     if v in (i["id"].lower(), i["alias"].lower(), i["email"].lower())]
 
     def search_identities(self, query, limit=20):
@@ -299,6 +313,36 @@ class MockTenant(Connector):
             state["roles"].append(role)
             self._save(state)
         return role
+
+    def create_source(self, payload):
+        self._delay()
+        self._maybe_fail()
+        with _lock:
+            state = self._state()
+            if any(s["name"].lower() == payload["name"].lower() for s in state["sources"]):
+                raise ConnectorError(f"HTTP 400: Source '{payload['name']}' already exists", status=400)
+            if payload.get("cluster") and not any(c["id"] == payload["cluster"]["id"] for c in state["clusters"]):
+                raise ConnectorError("HTTP 400: cluster not found", status=400)
+            source = dict(payload, id=uuid.uuid4().hex)
+            state["sources"].append(source)
+            self._save(state)
+        return source
+
+    def delete_source(self, source_id):
+        self._delay()
+        with _lock:
+            state = self._state()
+            before = len(state["sources"])
+            state["sources"] = [s for s in state["sources"] if s["id"] != source_id]
+            if len(state["sources"]) == before:
+                raise ConnectorError("Not found", status=404)
+            self._save(state)
+
+    def find_clusters(self, ref):
+        self._delay()
+        v = ref.strip().lower()
+        with _lock:
+            return [dict(c) for c in self._state()["clusters"] if v in (c["id"].lower(), c["name"].lower())]
 
     def delete_role(self, role_id):
         self._delay()

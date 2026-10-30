@@ -33,10 +33,11 @@ class Option:
     default: str
     choices: list
     help: str = ""
+    kind: str = "choice"  # "connection": one of the saved connections, validated when the job is created
 
     def to_dict(self):
         return {"name": self.name, "label": self.label, "default": self.default, "choices": self.choices,
-                "help": self.help}
+                "help": self.help, "kind": self.kind}
 
 
 @dataclass
@@ -71,10 +72,12 @@ def msg(level, text, field_name=None, code=None, value=None):
 
 
 class PlanContext:
-    """Connector plus a lookup cache, so 500 rows sharing one source resolve it once."""
+    """Connector plus a lookup cache, so 500 rows sharing one source resolve it once. `source` is the second
+    connection of actions that read from another environment (see Action.source_connection)."""
 
-    def __init__(self, connector):
+    def __init__(self, connector, source=None):
         self.connector = connector
+        self.source = source
         self._cache = {}
 
     def cached(self, key, fn):
@@ -102,6 +105,9 @@ class Action:
     # Experimental actions are built from the API documentation but not yet verified against a real tenant.
     # Nothing has been verified yet, so this is the default; set it to False on an action once it has been.
     experimental = True
+    # Reads from a second connection, chosen in the job option source_connection_id, while planning.
+    source_connection = False
+    hidden = False  # not offered in the action picker (e.g. a rollback-only action)
 
     def column_names(self):
         return [c.name for c in self.columns]
@@ -165,7 +171,11 @@ class Action:
     def rollback_row(self, item: dict):
         return None
 
+    def seed_context(self, ctx: PlanContext, items: list):
+        """Called before re-planning single rows, with all of the job's rows and their current plans."""
+
     def to_dict(self):
         return {"key": self.key, "title": self.title, "description": self.description,
                 "columns": [c.to_dict() for c in self.columns], "options": [o.to_dict() for o in self.options],
-                "inverse": self.inverse, "experimental": self.experimental}
+                "inverse": self.inverse, "experimental": self.experimental,
+                "source_connection": self.source_connection, "hidden": self.hidden}

@@ -359,6 +359,32 @@ def create_app(data_dir, *, allowed_hosts=None):
         return Response(toolkit.export_csv(job_id), mimetype="text/csv",
                         headers={"Content-Disposition": f'attachment; filename="{job["id"]}_results.csv"'})
 
+    # ------------------------------------------------------------------ compare environments (read-only)
+    @app.post("/api/compare")
+    def start_compare():
+        data = body()
+        compare_id = toolkit.compare.start(data.get("source_connection_id", ""), data.get("connection_id", ""),
+                                           data.get("object_type", ""))
+        return jsonify(id=compare_id), 201
+
+    @app.get("/api/compare/<compare_id>")
+    def get_compare(compare_id):
+        return jsonify(toolkit.compare.get(compare_id))
+
+    @app.post("/api/compare/<compare_id>/cancel")
+    def cancel_compare(compare_id):
+        toolkit.compare.get(compare_id)
+        toolkit.compare.cancel(compare_id)
+        return jsonify(ok=True)
+
+    @app.post("/api/compare/<compare_id>/create-job")
+    def create_job_from_compare(compare_id):
+        data = body()
+        selections = data.get("selections")
+        job_id = toolkit.create_copy_job(compare_id, selections if isinstance(selections, list) else [],
+                                         (data.get("name") or "").strip() or None)
+        return jsonify(id=job_id), 201
+
     # ------------------------------------------------------------------ reports (experimental, read-only)
     @app.get("/api/reports")
     def list_reports():

@@ -132,6 +132,8 @@ const routes = [
   [/^#\/new(?:\?action=([\w.]+))?$/, renderNewJob],
   [/^#\/connections$/, renderConnections],
   [/^#\/reports$/, renderReports],
+  [/^#\/compare$/, renderCompareForm],
+  [/^#\/compare\/([\w-]+)$/, renderCompare],
   [/^#\/reports\/([\w-]+)$/, renderReport],
   [/^#\/jobs\/([\w-]+)$/, renderJob],
   [/^#\/logs$/, renderLogs],
@@ -145,7 +147,7 @@ async function route() {
   document.querySelectorAll("[data-nav]").forEach((a) => {
     const nav = a.dataset.nav;
     a.classList.toggle("active", (nav === "jobs" && (hash === "#/" || hash.startsWith("#/jobs"))) ||
-      hash.split("?")[0] === "#/" + nav);
+      hash.split("?")[0] === "#/" + nav || (nav === "compare" && hash.startsWith("#/compare/")));
   });
   for (const [re, fn] of routes) {
     const m = hash.match(re);
@@ -226,6 +228,13 @@ const ACTION_NOTES = {
   "access_profile.update": [
     "Approvers: approval_schemes replaces all approvers. To use a governance group that does not exist yet, fill in new_group_owner (and new_group_members); the group is created right before the profile is updated.",
   ],
+  "object.copy": [
+    "Easiest start: the Compare page shows the differences between two connections and creates this job from the objects and attributes you tick.",
+    "Choose this job's connection as the target (e.g. production) and the environment to read from under “Copy from” (e.g. test).",
+    "Owners and members are matched by email (or username); governance groups, access profiles and sources by name; entitlements by name or value on the matching source. Anything that cannot be matched is flagged in the plan.",
+    "Environment-specific attributes — group members, a source's cluster and connection settings (hosts, URLs, service accounts, search DNs) — are kept as they are unless you name them in attributes or set a value in overrides. Secrets are never copied.",
+    "Rows run in file order: put governance groups and access profiles above the access profiles and roles that use them, and the plan links them up.",
+  ],
   "governance_group.create": [
     "A governance group is a team of identities used as approvers and reviewers. It has one owner (a person) and any number of members.",
     "A group without members cannot complete approvals; the plan warns about this.",
@@ -242,7 +251,8 @@ async function renderNewJob(presetAction) {
     return;
   }
   const opt = (a) => h("option", { value: a.key, selected: a.key === presetAction }, a.title);
-  const tested = META.actions.filter((a) => !a.experimental), untested = META.actions.filter((a) => a.experimental);
+  const listed = META.actions.filter((a) => !a.hidden);
+  const tested = listed.filter((a) => !a.experimental), untested = listed.filter((a) => a.experimental);
   const actionSel = h("select", { name: "action" },
     tested.length ? h("optgroup", { label: "Tested" }, tested.map(opt)) : null,
     untested.length ? h("optgroup", { label: "Experimental — not yet tested on a real tenant" }, untested.map(opt)) : null);
@@ -265,14 +275,16 @@ async function renderNewJob(presetAction) {
   const refresh = () => {
     const action = META.actions.find((a) => a.key === actionSel.value);
     optsBox.replaceChildren(...action.options.map((o) => h("label", { class: "field" }, h("span", {}, o.label, h("div", { class: "help" }, o.help)),
-      h("select", { name: "opt_" + o.name }, o.choices.map((c) => h("option", { value: c, selected: c === o.default }, c))))));
+      o.kind === "connection"
+        ? h("select", { name: "opt_" + o.name }, conns.filter((c) => c.id !== connSel.value).map((c) => h("option", { value: c.id }, `${c.name} (${c.environment})`)))
+        : h("select", { name: "opt_" + o.name }, o.choices.map((c) => h("option", { value: c, selected: c === o.default }, c))))));
     docs.replaceChildren(
       h("h2", {}, action.title, action.experimental ? experimentalBadge() : null), h("p", { class: "muted" }, action.description),
       action.experimental ? experimentalBanner() : null,
       h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Column"), h("th", {}, "Description"), h("th", {}, "Example"))),
         h("tbody", {}, action.columns.map((c) => h("tr", {}, h("td", { class: "mono" }, c.name, c.required ? " *" : ""), h("td", { class: "small" }, c.help, c.ref && c.ref !== "id" ? h("div", { class: "muted" }, `Looked up: ${REF_LABELS[c.ref] || c.ref}${c.multi ? " (several, ';')" : ""} — any text; misses suggest similar names`) : null), h("td", { class: "mono" }, c.example))))),
       h("p", {}, h("a", { class: "btn", href: `/api/actions/${action.key}/template.csv` }, "Download CSV template")),
-      ACTION_NOTES[action.key] ? h("div", { class: "banner info" }, h("strong", {}, "Owners and governance groups"),
+      ACTION_NOTES[action.key] ? h("div", { class: "banner info" }, h("strong", {}, action.key === "object.copy" ? "How copying works" : "Owners and governance groups"),
         h("ul", { class: "notes" }, ACTION_NOTES[action.key].map((t) => h("li", {}, t)))) : null);
     const conn = conns.find((c) => c.id === connSel.value);
     prodWarn.replaceChildren(conn && conn.environment === "production" ? h("div", { class: "banner prod" }, "This connection is PRODUCTION. Nothing is changed until you review and approve the plan.") : "");
@@ -489,7 +501,9 @@ async function renderJob(jobId) {
 
     header.replaceChildren(h("div", { class: "panel" },
       h("div", { class: "row spread" },
-        h("div", {}, h("h1", {}, j.name), h("div", { class: "muted small" }, `${j.action_title} · `, j.connection.name, " ", envBadge(j.connection.environment), j.source_file ? ` · ${j.source_file}` : "", ` · created ${fmtTime(j.created_at)}`,
+        h("div", {}, h("h1", {}, j.name), h("div", { class: "muted small" }, `${j.action_title} · `,
+          j.source_connection ? h("span", {}, "from ", j.source_connection.name, " ", j.source_connection.environment ? envBadge(j.source_connection.environment) : null, " to ") : null,
+          j.connection.name, " ", envBadge(j.connection.environment), j.source_file ? ` · ${j.source_file}` : "", ` · created ${fmtTime(j.created_at)}`,
           j.parent ? h("span", {}, " · created from ", h("a", { href: `#/jobs/${j.parent.id}` }, j.parent.name)) : null)),
         h("div", { class: "row" }, j.experimental ? experimentalBadge() : null, badge(j.status))),
       h("div", { class: "stepper" }, steps.map(([label], i) => h("div", { class: "step " + (i < currentIdx || j.status === "completed" ? "done" : i === currentIdx ? "current" : "") }, label))),
@@ -972,6 +986,140 @@ async function renderReport(reportId) {
     return running;
   };
   if (await load()) pollTimer = setInterval(async () => { if (!(await load().catch(() => false))) { clearInterval(pollTimer); pollTimer = null; } }, 1500);
+}
+
+// ------------------------------------------------------------------ compare environments
+// Read-only side-by-side view of one object type in two connections. The ticked objects and attributes
+// become a normal "Copy objects between environments" job, planned and reviewed like any other.
+const COPY_TYPES = [["access_profile", "Access profiles"], ["role", "Roles"], ["governance_group", "Governance groups"], ["source", "Sources"]];
+
+async function renderCompareForm() {
+  const conns = await api("GET", "/api/connections");
+  if (conns.length < 2) {
+    showView(h("h1", {}, "Compare environments"), h("div", { class: "panel empty" },
+      "Add two connections — e.g. your test and production tenants — to compare them. ", h("a", { href: "#/connections" }, "Go to connections")));
+    return;
+  }
+  const rank = { test: 0, sandbox: 1, production: 2 };
+  const byEnv = [...conns].sort((a, b) => rank[a.environment] - rank[b.environment]);
+  const connOpts = (selected) => conns.map((c) => h("option", { value: c.id, selected: c.id === selected }, `${c.name} (${c.environment})`));
+  const fromSel = h("select", {}, connOpts(byEnv[0].id));
+  const toSel = h("select", {}, connOpts(byEnv[byEnv.length - 1].id));
+  const typeSel = h("select", {}, COPY_TYPES.map(([k, l]) => h("option", { value: k }, l)));
+  const go = h("button", { class: "primary", type: "submit" }, "Compare");
+  showView(
+    h("div", { class: "row" }, h("h1", {}, "Compare environments"), experimentalBadge()),
+    h("p", { class: "muted" }, "Lists one object type in two connections and shows, attribute by attribute, what differs. Read-only: nothing changes until you create a copy job from the result and approve it."),
+    h("div", { class: "grid2" },
+      h("div", { class: "panel" }, h("form", { onsubmit: (e) => { e.preventDefault(); go.disabled = true; guarded(async () => {
+        const res = await api("POST", "/api/compare", { source_connection_id: fromSel.value, connection_id: toSel.value, object_type: typeSel.value });
+        location.hash = `#/compare/${res.id}`;
+      }).finally(() => { go.disabled = false; }); } },
+        h("label", { class: "field" }, h("span", {}, "Copy from ", h("span", { class: "help" }, "— e.g. test")), fromSel),
+        h("label", { class: "field" }, h("span", {}, "Copy to ", h("span", { class: "help" }, "— e.g. production; this is the connection that will be changed")), toSel),
+        h("label", { class: "field" }, h("span", {}, "Object type"), typeSel),
+        go)),
+      h("div", { class: "panel small" }, h("h2", {}, "How copying works"), h("ul", { class: "notes" },
+        h("li", {}, "Objects are matched by name. References are translated by name too: owners and members by email or username, groups, access profiles and sources by name, entitlements by name or value on the matching source."),
+        h("li", {}, "Pick the attributes to copy for objects that exist in both. Objects missing in the target are created with every copyable attribute."),
+        h("li", {}, "Environment-specific attributes — group members, a source's cluster and connection settings such as hosts, URLs and service accounts — are unticked by default and stay as they are in the target."),
+        h("li", {}, "Secrets (passwords, client secrets) are never copied; the API does not return them."),
+        h("li", {}, "The copy job's plan shows the exact before → after of every attribute. Rollback restores previous values and deletes created objects.")))));
+}
+
+function showValue(v) {
+  if (v === null || v === undefined || v === "") return h("span", { class: "muted" }, "(none)");
+  if (typeof v === "boolean") return v ? "yes" : "no";
+  if (Array.isArray(v)) return v.length ? v.join(", ") : h("span", { class: "muted" }, "(none)");
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
+async function renderCompare(compareId) {
+  const picked = new Map(); // source_id -> Set of attributes (empty set for new objects)
+  let filter = "changes";
+  const draw = (r) => {
+    const running = r.status === "running";
+    const counts = { new: 0, different: 0, same: 0, ambiguous: 0 };
+    r.rows.forEach((row) => { counts[row.status] += 1; });
+    const typeLabel = (r.type_label || "").toLowerCase() + "s";
+    const header = [
+      h("div", { class: "row spread" },
+        h("div", {}, h("h1", {}, `Compare ${typeLabel}`), h("div", { class: "small muted" }, r.source.name, " ", envBadge(r.source.environment), " → ", r.target.name, " ", envBadge(r.target.environment), ` · ${fmtTime(r.created_at)} · scanned ${r.scanned} object(s)`)),
+        h("div", { class: "row" }, experimentalBadge(), badge(r.status, r.status === "completed" ? "b-ok" : r.status === "failed" ? "b-err" : "b-info"))),
+      r.error ? h("div", { class: "banner err" }, r.error) : null,
+      running ? h("div", { class: "banner info" }, "Reading both environments (read-only)… ", h("button", { onclick: () => guarded(async () => { await api("POST", `/api/compare/${compareId}/cancel`); }) }, "Cancel")) : null,
+    ];
+    if (r.status !== "completed") { showView(header); return; }
+    if (!picked.size) {
+      r.rows.forEach((row) => {
+        if (row.status === "different") picked.set(row.source_id, new Set(row.diffs.filter((d) => !d.env_specific && !d.only_in_target).map((d) => d.attr)));
+      });
+    }
+    const visible = r.rows.filter((row) => filter === "all" || (filter === "changes" ? ["new", "different"].includes(row.status) : row.status === filter));
+    const chip = (k, l, n) => h("button", { class: "chip" + (filter === k ? " active" : ""), onclick: () => { filter = k; draw(r); } }, `${l} (${n})`);
+    const chosen = [...picked.entries()].filter(([id, attrs]) => {
+      const row = r.rows.find((x) => x.source_id === id);
+      return row && (row.status === "new" || attrs.size);
+    });
+    const nameIn = h("input", { placeholder: `Copy ${typeLabel} from ${r.source.name} to ${r.target.name}`, maxlength: "200", style: "max-width:420px" });
+    const create = h("button", { class: "primary", disabled: !chosen.length, onclick: () => guarded(async () => {
+      create.disabled = true;
+      try {
+        const res = await api("POST", `/api/compare/${compareId}/create-job`, { name: nameIn.value, selections: chosen.map(([id, attrs]) => ({ source_id: id, attributes: [...attrs] })) });
+        location.hash = `#/jobs/${res.id}`;
+      } finally { create.disabled = false; }
+    }) }, `Create copy job (${chosen.length})`);
+
+    const rowsEl = visible.map((row) => {
+      const selectable = ["new", "different"].includes(row.status);
+      const objBox = h("input", { type: "checkbox", disabled: !selectable, checked: picked.has(row.source_id) && (row.status === "new" || picked.get(row.source_id).size > 0),
+        onchange: (e) => {
+          if (!e.target.checked) picked.set(row.source_id, new Set());
+          else picked.set(row.source_id, new Set(row.status === "new" ? [] : row.diffs.filter((d) => !d.env_specific && !d.only_in_target).map((d) => d.attr)));
+          if (row.status === "new" && !e.target.checked) picked.delete(row.source_id);
+          draw(r);
+        } });
+      let detail = null;
+      if (row.status === "different") {
+        const attrs = picked.get(row.source_id) || new Set();
+        detail = h("table", { class: "diff" },
+          h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Attribute"), h("th", {}, `In ${r.source.name}`), h("th", {}, `In ${r.target.name}`))),
+          h("tbody", {}, row.diffs.map((d) => h("tr", {},
+            h("td", {}, h("input", { type: "checkbox", checked: attrs.has(d.attr), onchange: (e) => {
+              const set = picked.get(row.source_id) || new Set();
+              e.target.checked ? set.add(d.attr) : set.delete(d.attr);
+              picked.set(row.source_id, set); draw(r);
+            } })),
+            h("td", {}, h("span", { class: "mono" }, d.label), d.env_specific ? h("span", { class: "badge b-warn", title: "Usually differs per environment; kept unless you tick it" }, "environment-specific") : null,
+              d.only_in_target ? h("span", { class: "badge", title: "Not set in the source; copying removes it from the target" }, "only in target") : null),
+            h("td", { class: "val" }, showValue(d.source)), h("td", { class: "val" }, showValue(d.target))))));
+      } else if (row.status === "new") {
+        const kept = row.diffs.filter((d) => d.env_specific).map((d) => d.label);
+        detail = h("div", { class: "small muted" }, `Not in ${r.target.name} — will be created with all copyable attributes.`,
+          kept.length ? ` Not copied (environment-specific): ${kept.join(", ")}. Set target values in the job's overrides column if needed.` : "");
+      } else if (row.status === "ambiguous") {
+        detail = h("div", { class: "small", style: "color:var(--err)" }, row.problem);
+      }
+      return h("tr", { class: row.status === "same" ? "excluded" : "" },
+        h("td", {}, objBox),
+        h("td", {}, h("strong", {}, row.name), h("div", {}, badge(row.status, { new: "b-info", different: "b-warn", same: "", ambiguous: "b-err" }[row.status])),
+          row.secrets && row.secrets.length ? h("div", { class: "small muted" }, `Secrets not copied: ${row.secrets.join(", ")}`) : null),
+        h("td", {}, detail));
+    });
+    showView(header,
+      h("div", { class: "panel" },
+        h("div", { class: "chips" }, chip("changes", "To copy", counts.new + counts.different), chip("new", "New", counts.new), chip("different", "Different", counts.different),
+          chip("same", "Same", counts.same), counts.ambiguous ? chip("ambiguous", "Ambiguous", counts.ambiguous) : null, chip("all", "All", r.rows.length)),
+        r.only_in_target.length ? h("p", { class: "small muted" }, `Only in ${r.target.name} (left alone): ${r.only_in_target.join(", ")}`) : null,
+        visible.length ? h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Object"), h("th", {}, "Attributes"))), h("tbody", {}, rowsEl))
+          : h("div", { class: "empty" }, r.rows.length ? "Nothing in this filter" : `No ${typeLabel} in ${r.source.name}`)),
+      h("div", { class: "panel sticky-actions" },
+        h("div", { class: "row" }, nameIn, create,
+          h("span", { class: "small muted" }, `Creates a job on ${r.target.name}, planned read-only. Review every before → after, then approve.`))));
+  };
+  const load = async () => { const r = await api("GET", `/api/compare/${compareId}`); draw(r); return r.status === "running"; };
+  if (await load()) pollTimer = setInterval(async () => { if (!(await load().catch(() => false))) { clearInterval(pollTimer); pollTimer = null; } }, 1000);
 }
 
 // ------------------------------------------------------------------ boot

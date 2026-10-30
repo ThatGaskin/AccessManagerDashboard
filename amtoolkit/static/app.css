@@ -123,4 +123,10 @@ div.field { margin-bottom: 10px; }
 .approver-add { margin-top: 6px; gap: 6px; flex-wrap: wrap; align-items: flex-start; }
 .approver-add select { width: auto; flex: 0 1 auto; }
 .approver-add .picker { flex: 1 1 200px; }
+table.diff th, table.diff td { padding: 4px 6px; font-size: 12px; }
+table.diff td:first-child { width: 24px; }
+table.diff .badge { margin-left: 6px; }
+td.val { font-family: var(--mono); font-size: 12px; word-break: break-word; max-width: 360px; }
+.sticky-actions { position: sticky; bottom: 0; z-index: 4; box-shadow: 0 -4px 12px rgba(0,0,0,.08); }
+.sticky-actions input { flex: 1 1 240px; }
 [hidden] { display: none !important; }

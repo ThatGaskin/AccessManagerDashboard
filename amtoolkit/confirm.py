@@ -111,6 +111,13 @@ class Confirmer:
             verb = {"start": "start making these changes", "resume": "resume making these changes",
                     "approve": "approve this plan"}[command]
             lines.append(f"Target: {target}")
+            if action and action.source_connection:
+                try:
+                    source = self.store.get_connection(job["options"].get("source_connection_id"))
+                    lines.append(f"Copying from: {source['name']} ({source['environment']}) — the plan already holds "
+                                 "the values; nothing more is read from it")
+                except Exception:
+                    warnings.append("The connection this job copies from no longer exists")
             lines.append(f"Action: {action.title if action else job['action']}")
             lines += [f"{n} × {op}" for op, n in sorted(pending.items())] or ["No rows left to run"]
             if s["succeeded"] or s["skipped"] or s["failed"]:

@@ -220,6 +220,53 @@ Members are added right after the group is created. If that step fails, the row 
 ID and **Retry failed** only adds the members to the existing group. Rollback deletes the groups the
 job created. See `examples/governance_groups_sandbox.csv`.
 
+## Copy between environments
+
+Promote work from a test tenant to production (or between any two connections) **attribute by
+attribute**: access profiles, roles, governance groups and sources. Like everything else, it is
+**experimental** and tested only against the offline sandbox.
+
+1. **Compare** (top bar): choose *Copy from* (e.g. test), *Copy to* (e.g. production) and an object type.
+   The toolkit reads both environments (read-only) and lists each object as *new*, *different* or
+   *same*, with every differing attribute side by side.
+2. Tick the objects and, for existing ones, the attributes to copy, then **Create copy job**. Or upload a
+   CSV for the *Copy objects between environments* action on **New job** (job option *Copy from*).
+3. The job is planned against the target like any other: every attribute shows its before → after, rows
+   with problems are flagged, and nothing changes until you approve and start it. Rollback restores the
+   previous values and deletes the objects the job created.
+
+**References are matched by name**, because IDs differ between tenants: owners and members by email
+(or username), governance groups, access profiles and sources by name, entitlements by name or value on
+the matching source. Anything that cannot be matched in the target fails the row in the plan. Rows run in
+file order, and a row can use an object created by an earlier row of the same job — put the governance
+group above the access profile it approves.
+
+**Environment-specific settings are kept.** Governance group members, a source's virtual appliance
+cluster and its connection settings (anything that names a host, URL, port, domain, service account,
+search DN, client ID…) are left as they are in the target, and are not copied to new objects, unless a row
+names them in `attributes` or sets a target value in `overrides`. **Secrets** (passwords, client
+secrets, tokens) are never copied: the API does not return them.
+
+| Column | Required | Notes |
+|---|---|---|
+| `object_type` | yes | `access_profile`, `role`, `governance_group` or `source`. |
+| `object` | yes | Name or ID in the environment you copy **from**. |
+| `target_name` | | Name in the target when it differs. |
+| `attributes` | | For objects that already exist in the target: attributes to copy, separated by `;`. Blank = all except environment-specific ones. Source connector settings are `config.<setting>`, e.g. `config.pageSize`. |
+| `keep` | | Attributes to leave as they are in the target — also for new objects. |
+| `overrides` | | Sources only: target values instead of the copied ones, `name=value` separated by `;` (list values separated by `\|`), e.g. `cluster=Prod VA;config.host=dc01.prod.local`. A new source on a virtual appliance needs `cluster=`. |
+
+Attributes: access profiles — `description`, `owner`, `requestable`, `enabled`, `approval_schemes`,
+`comments_required`, `denial_comments_required`, `entitlements`; roles — `description`, `owner`,
+`requestable`, `enabled`, `access_profiles`; governance groups — `description`, `owner`, `members`;
+sources — `description`, `owner`, `delete_threshold`, `authoritative`, `management_workgroup`,
+`cluster`, `config.<setting>`. Not covered: role membership criteria, source schemas, provisioning
+policies, correlation and transforms.
+
+API used in addition: `POST/DELETE /v3/sources` and `GET /v3/managed-clusters` (scopes `idn:sources:manage`,
+`idn:managed-cluster:read`) on the target, and read access to the same object types on the source.
+Comparison results are kept in memory until the toolkit restarts.
+
 ## More actions and reports
 
 Like the rest of the toolkit, these are marked **experimental** throughout the UI (top bar, job pages,
@@ -290,8 +337,10 @@ amtoolkit/
   logs.py                  Backend logging: console, rotating file, in-memory buffer for the Logs page
   csvio.py                 CSV parsing/export
   actions/                 bulk actions (CSV schema → plan → execute → rollback):
-                           access profiles and governance groups; experimental.py for the rest
+                           access profiles and governance groups; copy.py copies between environments;
+                           experimental.py for the rest
   reports.py               read-only hygiene reports (experimental)
+  compare.py               read-only side-by-side comparison of two connections
   connectors/              target systems: SailPoint ISC, offline sandbox; resilient HTTP client;
                            model.py normalizes objects and builds JSON Patch updates
   static/                  single-page UI (vanilla JS/CSS, no build step)

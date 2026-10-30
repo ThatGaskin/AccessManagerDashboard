@@ -9,10 +9,11 @@ import logging
 from pathlib import Path
 
 from . import csvio
-from .actions import ACTIONS, PlanContext, get_action
+from .actions import ACTIONS, get_action
 from .connectors import ConnectionManager, KINDS
 from .db import Database
-from .engine import Engine, JobStateError, plan_item, recheck_duplicates
+from .engine import Engine, JobStateError, plan_context, plan_item, recheck_duplicates
+from .compare import CompareRunner
 from .reports import REPORTS, ReportRunner
 from .store import EDITABLE_ITEM_STATUSES, NotFound, Store
 from .util import now_iso
@@ -35,6 +36,7 @@ class Toolkit:
         self.engine = Engine(self.store, self.connections)
         self.engine.recover()
         self.reports = ReportRunner(self.db, self.connections)
+        self.compare = CompareRunner(self.connections)
 
     # ---------------------------------------------------------------- connections
     def connection_view(self, conn):
@@ -88,15 +90,26 @@ class Toolkit:
                    rows=None):
         action = get_action(action_key)
         conn = self.store.get_connection(connection_id)
+        options = action.clean_options(options)
+        if action.source_connection:
+            source_id = options.get("source_connection_id")
+            if not source_id:
+                raise ValueError("Choose the connection to copy from")
+            try:
+                source = self.store.get_connection(source_id)
+            except NotFound:
+                raise ValueError("The connection to copy from does not exist") from None
+            if source["id"] == conn["id"]:
+                raise ValueError("Copy from a different connection than the one being changed")
         warnings = []
         if rows is None:
             rows, warnings = csvio.parse(data, action)
         name = (name or "").strip() or f"{action.title} – {Path(filename or 'upload').name}"
-        job_id = self.store.create_job(name[:200], action.key, conn["id"], action.clean_options(options),
-                                       filename, rows, parent_job_id)
+        job_id = self.store.create_job(name[:200], action.key, conn["id"], options, filename, rows, parent_job_id)
+        copying = f", copying from '{source['name']}' ({source['environment']})" if action.source_connection else ""
         self.store.add_event(job_id, "info", "created",
                              f"Job created from {filename or 'generated rows'} with {len(rows)} row(s) "
-                             f"against '{conn['name']}' ({conn['environment']})")
+                             f"against '{conn['name']}' ({conn['environment']}){copying}")
         for warning in warnings:
             self.store.add_event(job_id, "warning", "csv", warning)
         self.store.transition_job(job_id, ("planning",), "review")
@@ -128,6 +141,13 @@ class Toolkit:
             "delete": status not in ("planning", "running", "pausing") and not active,
             "create_groups": bool(missing_groups) and not active,
         }
+        source = None
+        if action and action.source_connection:
+            try:
+                s = self.store.get_connection(job["options"].get("source_connection_id"))
+                source = {"id": s["id"], "name": s["name"], "environment": s["environment"]}
+            except NotFound:
+                source = {"id": None, "name": "(deleted connection)", "environment": ""}
         parent = None
         if job["parent_job_id"]:
             try:
@@ -137,6 +157,7 @@ class Toolkit:
                 pass
         return dict(job, counts=counts, approved=approved, active=active, blockers=blockers, allowed=allowed,
                     missing_governance_groups=missing_groups, new_governance_groups=new_groups, parent=parent,
+                    source_connection=source,
                     action_title=action.title if action else job["action"],
                     experimental=bool(action and action.experimental),
                     connection={"id": conn["id"], "name": conn["name"], "environment": conn["environment"],
@@ -169,7 +190,8 @@ class Toolkit:
     def _replan(self, job, action, item_ids):
         if not item_ids:
             return
-        ctx = PlanContext(self.connections.build(job["connection_id"]))
+        ctx = plan_context(self.connections, job, action)
+        action.seed_context(ctx, self.store.all_items(job["id"]))
         for item_id in item_ids:
             plan_item(self.store, action, ctx, self.store.get_item(job["id"], item_id), job["options"])
         recheck_duplicates(self.store, action, job["id"])
@@ -362,6 +384,37 @@ class Toolkit:
                              f"Created from report '{definition.title}' ({len(rows)} finding(s))"
                              + (f"; filled for all rows: {', '.join(defaults)}" if defaults else ""),
                              data={"report_id": report_id, "defaults": defaults})
+        return job_id
+
+    def create_copy_job(self, compare_id, selections, name=None):
+        """Turns the objects and attributes chosen on a comparison into a 'Copy objects between environments'
+        job. selections: [{"source_id": ..., "attributes": [...]}]; attributes are ignored for objects that do
+        not exist in the target yet (they are created with every copyable attribute)."""
+        result = self.compare.get(compare_id)
+        if result["status"] != "completed":
+            raise JobStateError("The comparison has not finished")
+        by_id = {r["source_id"]: r for r in result["rows"]}
+        action = get_action("object.copy")
+        rows = []
+        for sel in selections or []:
+            row = by_id.get((sel or {}).get("source_id"))
+            if row is None or row["status"] not in ("new", "different"):
+                continue
+            attributes = [str(a) for a in sel.get("attributes") or []] if row["status"] == "different" else []
+            if row["status"] == "different" and not attributes:
+                continue
+            rows.append((len(rows) + 1, action.normalize({"object_type": result["type"], "object": row["source_id"],
+                                                          "attributes": ";".join(attributes)})))
+        if not rows:
+            raise ValueError("Choose at least one object (and, for existing ones, at least one attribute)")
+        title = name or (f"Copy {result['type_label'].lower()}s from {result['source']['name']} to "
+                         f"{result['target']['name']}")
+        job_id = self.create_job(name=title, action_key=action.key, connection_id=result["target"]["id"],
+                                 options={"source_connection_id": result["source"]["id"], "if_missing": "create"},
+                                 filename=f"comparison {compare_id}", data=None, rows=rows)
+        self.store.add_event(job_id, "info", "from_comparison",
+                             f"Created from a comparison of {result['type_label'].lower()}s: {len(rows)} object(s)",
+                             data={"compare_id": compare_id})
         return job_id
 
     def delete_job(self, job_id):
