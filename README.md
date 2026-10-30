@@ -11,7 +11,23 @@ file. No external database, no cloud service, no CDN — the UI works offline.
 Target system today: **SailPoint Identity Security Cloud (IdentityNow)**, plus an offline **Sandbox**
 connector for practice, demos and training.
 
-## Quick start
+## Install on Windows (no Python needed)
+
+1. Download `AccessManagerToolkit-<version>-windows-x64.exe` from the
+   [latest release](https://github.com/ThatGaskin/AccessManagerDashboard/releases/latest).
+   Optionally verify it: `Get-FileHash <file>.exe` in PowerShell must match the `.sha256` file.
+2. Double-click it. A console window opens and the toolkit opens in your browser at
+   `http://127.0.0.1:8765`. Keep the console window open while you work; press **Ctrl+C** in it to stop
+   (running jobs are paused safely).
+3. The executable is not code-signed, so SmartScreen may say *Windows protected your PC* —
+   choose **More info → Run anyway** once you have checked the hash.
+
+Data (jobs, audit log, sandbox) lives in `%LOCALAPPDATA%\AccessManagerToolkit` and survives upgrades:
+download the new `.exe` and run it instead of the old one. To supply a client secret at startup,
+start it from PowerShell: `$env:AMT_CLIENT_SECRET = '...'; .\AccessManagerToolkit-….exe`.
+Starting it a second time just opens the browser on the instance that is already running.
+
+## Run from source
 
 ```bash
 python -m venv .venv
@@ -26,6 +42,7 @@ python run.py                    # opens http://127.0.0.1:8765
 4. Try **Pause**, edit a pending row, re-approve, **Resume**. Afterwards try **Create rollback…**.
 
 Options: `--port 8765`, `--data-dir ./data`, `--no-browser`, `--debug` (or `AMT_PORT`, `AMT_DATA_DIR`).
+From source the data folder defaults to `./data`; the Windows executable uses `%LOCALAPPDATA%\AccessManagerToolkit`.
 
 ## How a bulk job works
 
@@ -116,6 +133,8 @@ amtoolkit/
   connectors/              target systems: SailPoint ISC, offline sandbox; resilient HTTP client
   static/                  single-page UI (vanilla JS/CSS, no build step)
 tests/                     pytest suite (workflow, safety rules, HTTP retry logic, API security)
+packaging/amtoolkit.spec   PyInstaller build of the single-file Windows executable
+.github/workflows/         CI (tests on Linux + Windows) and Release (build, smoke-test, publish .exe)
 examples/                  sample CSV for the sandbox
 ```
 
@@ -133,3 +152,25 @@ flow, progress, pause/resume and audit log work automatically.
 pip install -r requirements-dev.txt
 pytest
 ```
+
+### Building the executable locally
+
+```bash
+pip install -r requirements-build.txt
+pyinstaller --clean --noconfirm packaging/amtoolkit.spec   # → dist/AccessManagerToolkit.exe
+```
+
+PyInstaller builds for the OS it runs on, so build the `.exe` on Windows (or let the Release workflow do it).
+
+## Releasing
+
+1. Bump `__version__` in `amtoolkit/__init__.py` and merge to `main`.
+2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+3. The **Release** workflow runs the tests on Windows, builds the `.exe`, starts it and checks that it
+   serves the UI, then publishes a GitHub release with the `.exe` and its SHA-256 checksum.
+   It refuses to publish if the tag does not match `__version__`. Tags containing `-` (e.g. `v0.2.0-rc1`)
+   become pre-releases.
+
+To get a test build without publishing, run **Actions → Release → Run workflow**; the `.exe` is attached
+to the workflow run as an artifact.
+
