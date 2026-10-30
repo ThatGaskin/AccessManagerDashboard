@@ -148,7 +148,7 @@ async function route() {
   document.querySelectorAll("[data-nav]").forEach((a) => {
     const nav = a.dataset.nav;
     a.classList.toggle("active", (nav === "jobs" && (hash === "#/" || hash.startsWith("#/jobs"))) ||
-      hash.split("?")[0] === "#/" + nav || (nav === "copy" && hash.startsWith("#/compare")));
+      hash.split("?")[0] === "#/" + nav || (nav === "compare" && hash.startsWith("#/compare/")));
   });
   for (const [re, fn] of routes) {
     const m = hash.match(re);
@@ -1092,7 +1092,9 @@ async function renderCopy() {
         h("td", {}, h("span", { class: "mono" }, d.label),
           d.env_specific ? h("span", { class: "badge b-warn", title: "Usually differs per environment; left alone unless you tick it" }, "environment-specific") : null,
           d.only_in_target ? h("span", { class: "badge", title: `Not set in ${from}; moving it removes it from ${to}` }, `only in ${to}`) : null,
-          locked ? h("span", { class: "badge" }, "required") : null),
+          locked ? h("span", { class: "badge" }, "required") : null,
+          h("button", { class: "link hist", title: `When ${d.label} changed in ${from} and ${to}`, onclick: () => historyDialog({ type: typeSel.value, title: `${row.name} · ${d.label}`, attribute: d.attr,
+            sides: [{ connId: fromSel.value, name: from, objectId: row.source_id }, { connId: toSel.value, name: to, objectId: row.target_id }] }) }, "history")),
         compareCells(d, ticked, isNew, state.overrides[d.attr]),
         h("td", {}, override));
     });
@@ -1105,10 +1107,13 @@ async function renderCopy() {
           h("div", {}, h("h2", {}, row.name, " ", badge(row.status === "same" ? "same" : isNew ? `new in ${to}` : `${differing.length} difference(s)`,
             row.status === "same" ? "b-ok" : isNew ? "b-info" : "b-warn")),
             h("div", { class: "small muted" }, isNew ? `Not in ${to} yet — it will be created there with the ticked values.` :
-              row.status === "same" ? `Every value already matches ${to}.` : `Tick the values to move from ${from} to ${to}.`)),
-          differing.length ? h("div", { class: "row" },
-            h("button", { onclick: () => { differing.forEach((d) => state.picked.add(d.attr)); draw(); } }, "Tick all differences"),
-            h("button", { onclick: () => { state.picked.clear(); draw(); } }, "Untick all")) : null),
+              row.status === "same" ? `Every value already matches ${to}.` : `Tick the values to move from ${from} to ${to}.`),
+            changedLine(row, from, to)),
+          h("div", { class: "row" },
+            h("button", { onclick: () => historyDialog({ type: typeSel.value, title: row.name, attribute: null,
+              sides: [{ connId: fromSel.value, name: from, objectId: row.source_id }, { connId: toSel.value, name: to, objectId: row.target_id }] }) }, "History"),
+            differing.length ? h("button", { onclick: () => { differing.forEach((d) => state.picked.add(d.attr)); draw(); } }, "Tick all differences") : null,
+            differing.length ? h("button", { onclick: () => { state.picked.clear(); draw(); } }, "Untick all") : null)),
         diffLegend(from, to),
         h("table", { class: "diff copy" },
           h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Attribute"), h("th", {}, `In ${from}`), h("th", {}, ""), h("th", {}, `In ${to}`), h("th", {}, typeSel.value === "source" ? `Use instead in ${to}` : ""))),
@@ -1167,7 +1172,7 @@ async function renderCopy() {
   showView(
     h("div", { class: "row spread" }, h("div", { class: "row" }, h("h1", {}, "Copy between environments"), experimentalBadge()),
       h("div", { class: "row" }, demoButton(conns.some((c) => c.name === "Demo Test") ? "Reset demo environments" : "Create demo environments"),
-        h("a", { href: "#/compare" }, "Compare all objects of a type →"))),
+        h("a", { href: "#/compare" }, "Scan and compare all objects of a type →"))),
     h("div", { class: "panel" }, h("div", { class: "copy-pick" },
       h("label", { class: "field" }, h("span", {}, "From"), fromSel),
       h("label", { class: "field" }, h("span", {}, "To ", h("span", { class: "help" }, "— changed")), toSel),
@@ -1194,12 +1199,12 @@ async function renderCompareForm() {
   const connOpts = (selected) => conns.map((c) => h("option", { value: c.id, selected: c.id === selected }, `${c.name} (${c.environment})`));
   const fromSel = h("select", {}, connOpts(byEnv[0].id));
   const toSel = h("select", {}, connOpts(byEnv[byEnv.length - 1].id));
-  const typeSel = h("select", {}, COPY_TYPES.map(([k, l]) => h("option", { value: k }, l)));
-  const go = h("button", { class: "primary", type: "submit" }, "Compare");
+  const typeSel = h("select", {}, COPY_TYPES.map(([k, l]) => h("option", { value: k, selected: k === "source" }, l)));
+  const go = h("button", { class: "primary", type: "submit" }, "Scan and compare");
   showView(
     h("div", { class: "row spread" }, h("div", { class: "row" }, h("h1", {}, "Compare environments"), experimentalBadge()),
       h("a", { href: "#/copy" }, "← Copy one object")),
-    h("p", { class: "muted" }, "Lists one object type in two connections and shows, attribute by attribute, what differs. Read-only: nothing changes until you create a copy job from the result and approve it."),
+    h("p", { class: "muted" }, "Scans every object of one type in two connections and shows, attribute by attribute, what differs and which side changed more recently. For sources it also compares each source's entitlements. Read-only: nothing changes until you create a copy job from the result and approve it."),
     h("div", { class: "grid2" },
       h("div", { class: "panel" }, h("form", { onsubmit: (e) => { e.preventDefault(); go.disabled = true; guarded(async () => {
         const res = await api("POST", "/api/compare", { source_connection_id: fromSel.value, connection_id: toSel.value, object_type: typeSel.value });
@@ -1276,6 +1281,61 @@ function diffLegend(from, to) {
     h("span", {}, h("del", { class: "v" }, "old"), " ", h("ins", { class: "v" }, "new"), ` value in ${to} after the move`));
 }
 
+
+function fmtAgo(iso) {
+  if (!iso) return "";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (!isFinite(s)) return "";
+  const units = [[31536000, "year"], [2592000, "month"], [86400, "day"], [3600, "hour"], [60, "minute"]];
+  for (const [n, u] of units) { const v = Math.floor(s / n); if (v >= 1) return `${v} ${u}${v > 1 ? "s" : ""} ago`; }
+  return "just now";
+}
+
+// When each side was last changed, and which one more recently. A target changed after the source may hold
+// a fix that moving the source's values would overwrite.
+function changedLine(row, from, to) {
+  const side = (name, iso) => h("span", { title: iso ? fmtTime(iso) : "" }, name, " ", iso ? fmtAgo(iso) : h("span", { class: "muted" }, "unknown"));
+  return h("div", { class: "small changed" }, "Last changed: ", side(from, row.source_modified),
+    row.target_id ? [h("span", { class: "sep" }, "·"), side(to, row.target_modified)] : null,
+    row.newer === "target" ? h("span", { class: "badge b-warn", title: `Moving values from ${from} would overwrite a newer change made in ${to}. Check the history first.` }, `⚠ changed more recently in ${to}`) : null,
+    row.newer === "source" ? h("span", { class: "badge b-info" }, `changed more recently in ${from}`) : null);
+}
+
+// Change history of one object (or one attribute), fetched on request for both environments: the toolkit's
+// own record of the changes its jobs made, and the tenant's audit events.
+function historyDialog({ type, title, attribute, sides }) {
+  const columns = sides.map((s) => h("div", { class: "history-col" }, h("h3", {}, s.name), h("div", { class: "muted small" }, s.objectId ? "Loading…" : `Not in ${s.name}`)));
+  openModal(h("h2", {}, `History — ${title}`),
+    h("p", { class: "small muted" }, "Newest first. Toolkit entries are changes made by this toolkit's jobs, with the exact values. Audit events come from the tenant: they say who changed the object and when, and the values where the event records them."),
+    h("div", { class: "grid2" }, columns),
+    h("div", { class: "modal-actions" }, h("button", { onclick: closeModal }, "Close")));
+  const mine = modalSeq;
+  sides.forEach(async (s, i) => {
+    if (!s.objectId) return;
+    let data;
+    try {
+      data = await api("GET", `/api/connections/${s.connId}/history?type=${type}&id=${encodeURIComponent(s.objectId)}${attribute ? `&attribute=${encodeURIComponent(attribute)}` : ""}`);
+    } catch (e) { if (mine === modalSeq) columns[i].lastChild.replaceWith(h("div", { class: "banner err" }, e.message)); return; }
+    if (mine !== modalSeq) return;
+    const entries = [...data.toolkit.map((e) => ({ ...e, from: "toolkit" })), ...data.tenant.map((e) => ({ ...e, from: "tenant" }))]
+      .sort((a, b) => String(b.time || "").localeCompare(String(a.time || "")));
+    const change = (k, c) => h("div", { class: "hist-change" }, h("span", { class: "mono" }, k), ": ", h("del", { class: "v" }, showValue(c.old)), " → ", h("ins", { class: "v" }, showValue(c.new)));
+    columns[i].lastChild.replaceWith(h("div", {},
+      data.object.modified ? h("div", { class: "small muted" }, `Last changed ${fmtTime(data.object.modified)} (${fmtAgo(data.object.modified)})`) : null,
+      data.tenant_error ? h("div", { class: "banner warn small" }, data.tenant_error) : null,
+      entries.length ? h("ul", { class: "history" }, entries.map((e) => h("li", {},
+        h("div", { class: "row spread" }, h("strong", { title: fmtTime(e.time) }, fmtAgo(e.time) || "—"),
+          e.from === "toolkit" ? badge("toolkit job", "b-ok") : badge("audit event", "b-info")),
+        h("div", { class: "small muted" }, fmtTime(e.time), " · ", e.from === "toolkit"
+          ? [e.action, " · ", h("a", { href: `#/jobs/${e.job_id}`, onclick: closeModal }, e.job_name), e.approved_by ? ` · approved by ${e.approved_by}` : ""]
+          : [e.action || "change", e.actor ? ` · by ${e.actor}` : ""]),
+        e.change === "created" ? h("div", { class: "small" }, "Created by this job") : e.change === "deleted" ? h("div", { class: "small" }, "Deleted by this job") : null,
+        Object.entries(e.changes || {}).map(([k, c]) => change(k, c)),
+        e.from === "tenant" && !e.values_known && attribute ? h("div", { class: "small muted" }, "The event does not record which values changed.") : null)))
+        : h("div", { class: "muted small" }, attribute ? "No recorded changes to this attribute." : "No recorded changes.")));
+  });
+}
+
 async function renderCompare(compareId) {
   const picked = new Map(); // source_id -> Set of attributes (empty set for new objects)
   let filter = "changes";
@@ -1287,7 +1347,8 @@ async function renderCompare(compareId) {
     const header = [
       h("div", { class: "row spread" },
         h("div", {}, h("h1", {}, `Compare ${typeLabel}`), h("div", { class: "small muted" }, r.source.name, " ", envBadge(r.source.environment), " → ", r.target.name, " ", envBadge(r.target.environment), ` · ${fmtTime(r.created_at)} · scanned ${r.scanned} object(s)`)),
-        h("div", { class: "row" }, experimentalBadge(), badge(r.status, r.status === "completed" ? "b-ok" : r.status === "failed" ? "b-err" : "b-info"))),
+        h("div", { class: "row" }, r.status === "completed" ? h("a", { class: "btn", href: `/api/compare/${compareId}/export.csv` }, "Download CSV") : null,
+          experimentalBadge(), badge(r.status, r.status === "completed" ? "b-ok" : r.status === "failed" ? "b-err" : "b-info"))),
       r.error ? h("div", { class: "banner err" }, r.error) : null,
       running ? h("div", { class: "banner info" }, "Reading both environments (read-only)… ", h("button", { onclick: () => guarded(async () => { await api("POST", `/api/compare/${compareId}/cancel`); }) }, "Cancel")) : null,
     ];
@@ -1297,7 +1358,9 @@ async function renderCompare(compareId) {
         if (row.status === "different") picked.set(row.source_id, new Set(row.diffs.filter((d) => !d.env_specific && !d.only_in_target).map((d) => d.attr)));
       });
     }
-    const visible = r.rows.filter((row) => filter === "all" || (filter === "changes" ? ["new", "different"].includes(row.status) : row.status === filter));
+    const visible = r.rows.filter((row) => filter === "all" || (filter === "changes" ? ["new", "different"].includes(row.status)
+      : filter === "entitlements" ? row.entitlements_differ : filter === "newer" ? row.newer === "target" : row.status === filter));
+    const newerCount = r.rows.filter((row) => row.newer === "target").length;
     const chip = (k, l, n) => h("button", { class: "chip" + (filter === k ? " active" : ""), onclick: () => { filter = k; draw(r); } }, `${l} (${n})`);
     const chosen = [...picked.entries()].filter(([id, attrs]) => {
       const row = r.rows.find((x) => x.source_id === id);
@@ -1338,20 +1401,41 @@ async function renderCompare(compareId) {
       } else if (row.status === "new") {
         const kept = row.diffs.filter((d) => d.env_specific).map((d) => d.label);
         detail = h("div", { class: "small muted" }, `Not in ${r.target.name} — will be created with all copyable attributes.`,
-          kept.length ? ` Not copied (environment-specific): ${kept.join(", ")}. Set target values in the job's overrides column if needed.` : "");
+          kept.length ? ` Not copied (environment-specific): ${kept.join(", ")}. To give them values for ${r.target.name}, copy it from the Copy page and fill in “Use instead”.` : "");
       } else if (row.status === "ambiguous") {
         detail = h("div", { class: "small", style: "color:var(--err)" }, row.problem);
       }
-      return h("tr", { class: row.status === "same" ? "excluded" : "" },
+      const ents = row.entitlements;
+      const entEl = ents ? h("div", { class: "ents small" }, h("strong", {}, "Entitlements: "), `${ents.source_count} in ${r.source.name}`,
+        ents.target_count === null ? "" : ` · ${ents.target_count} in ${r.target.name}`,
+        row.entitlements_differ ? h("div", { class: "ent-chips" },
+          ents.only_in_source.length ? valueChips(ents.only_in_source, [], "add") : null,
+          ents.only_in_target.length ? valueChips(ents.only_in_target, [], "extra") : null,
+          (ents.only_in_source_count || 0) + (ents.only_in_target_count || 0) > ents.only_in_source.length + ents.only_in_target.length ? h("span", { class: "muted" }, " …more in the CSV") : null,
+          h("div", { class: "muted" }, `Entitlements are not copied: they come from aggregating the source. Aggregate it in ${r.target.name} to bring new ones over.`))
+          : ents.target_count !== null ? h("span", { class: "muted" }, " · the same names on both sides") : null) : null;
+      if (row.status === "same") detail = h("div", { class: "small muted" }, "Every copyable attribute matches.");
+      return h("tr", { class: row.status === "same" && !row.entitlements_differ ? "excluded" : "" },
         h("td", {}, objBox),
-        h("td", {}, h("strong", {}, row.name), h("div", {}, badge(row.status, { new: "b-info", different: "b-warn", same: "", ambiguous: "b-err" }[row.status])),
+        h("td", {}, h("strong", {}, row.name), h("div", {}, badge(row.status, { new: "b-info", different: "b-warn", same: "", ambiguous: "b-err" }[row.status]),
+          row.entitlements_differ ? h("span", { class: "badge b-warn" }, "entitlements differ") : null),
+          row.status !== "ambiguous" ? changedLine(row, r.source.name, r.target.name) : null,
+          row.status !== "ambiguous" ? h("button", { class: "link small", onclick: () => historyDialog({ type: r.type, title: row.name, attribute: null,
+            sides: [{ connId: r.source.id, name: r.source.name, objectId: row.source_id }, { connId: r.target.id, name: r.target.name, objectId: row.target_id }] }) }, "History") : null,
           row.secrets && row.secrets.length ? h("div", { class: "small muted" }, `Secrets not copied: ${row.secrets.join(", ")}`) : null),
-        h("td", {}, detail));
+        h("td", {}, detail, entEl));
     });
     showView(header,
       h("div", { class: "panel" },
+        h("div", { class: "stats scan-summary" }, [[`In ${r.source.name}`, r.summary.in_source], [`In ${r.target.name}`, r.summary.in_target], [`New in ${r.target.name}`, r.summary.new],
+          ["Different", r.summary.different], ["Same", r.summary.same], [`Only in ${r.target.name}`, r.summary.only_in_target],
+          ...(r.type === "source" ? [["Entitlements differ", r.summary.entitlements_differ]] : []), [`Changed more recently in ${r.target.name}`, newerCount]]
+          .map(([l, n]) => h("div", { class: "stat" }, h("b", {}, n), h("span", { class: "muted small" }, l)))),
+        r.entitlements_incomplete ? h("div", { class: "banner warn small" }, "More entitlements than the scan reads (20,000 per environment): the entitlement comparison is incomplete.") : null,
         h("div", { class: "chips" }, chip("changes", "To copy", counts.new + counts.different), chip("new", "New", counts.new), chip("different", "Different", counts.different),
-          chip("same", "Same", counts.same), counts.ambiguous ? chip("ambiguous", "Ambiguous", counts.ambiguous) : null, chip("all", "All", r.rows.length)),
+          chip("same", "Same", counts.same), r.type === "source" ? chip("entitlements", "Entitlements differ", r.summary.entitlements_differ) : null,
+          newerCount ? chip("newer", `Changed more recently in ${r.target.name}`, newerCount) : null,
+          counts.ambiguous ? chip("ambiguous", "Ambiguous", counts.ambiguous) : null, chip("all", "All", r.rows.length)),
         r.only_in_target.length ? h("p", { class: "small muted" }, `Only in ${r.target.name} (left alone): ${r.only_in_target.join(", ")}`) : null,
         counts.different ? diffLegend(r.source.name, r.target.name) : null,
         visible.length ? h("table", { class: "compare-list" }, h("thead", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Object"), h("th", {}, "Attributes"))), h("tbody", {}, rowsEl))

@@ -8,6 +8,7 @@ import getpass
 import hmac
 import logging
 import mimetypes
+import re
 import secrets
 import time
 from importlib import resources
@@ -369,6 +370,11 @@ def create_app(data_dir, *, allowed_hosts=None):
         toolkit.store.get_connection(conn_id)
         return jsonify(toolkit.list_object_names(conn_id, request.args.get("type", ""), request.args.get("q", "")))
 
+    @app.get("/api/connections/<conn_id>/history")
+    def object_history(conn_id):
+        return jsonify(toolkit.object_history(conn_id, request.args.get("type", ""), request.args.get("id", ""),
+                                              request.args.get("attribute") or None))
+
     @app.post("/api/copy/preview")
     def copy_preview():
         return jsonify(toolkit.copy_preview(body()))
@@ -409,6 +415,13 @@ def create_app(data_dir, *, allowed_hosts=None):
     @app.get("/api/compare/<compare_id>")
     def get_compare(compare_id):
         return jsonify(toolkit.compare.get(compare_id))
+
+    @app.get("/api/compare/<compare_id>/export.csv")
+    def export_compare(compare_id):
+        result = toolkit.compare.get(compare_id)
+        name = re.sub(r"[^\w.-]+", "_", f"compare_{result['type']}s_{result['source']['name']}_{result['target']['name']}") + ".csv"
+        return Response(toolkit.compare_csv(compare_id), mimetype="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     @app.post("/api/compare/<compare_id>/cancel")
     def cancel_compare(compare_id):

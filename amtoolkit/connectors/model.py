@@ -4,6 +4,7 @@ Connectors return API-shaped objects (as Identity Security Cloud does); `normali
 dicts that actions compare and display, and `to_patch` turns a set of field changes back into JSON Patch
 operations. The sandbox applies the same patches, so both connectors behave identically.
 """
+from datetime import datetime
 
 TYPES = ("access_profile", "role", "entitlement", "source", "governance_group")
 TYPE_LABELS = {"access_profile": "Access profile", "role": "Role", "entitlement": "Entitlement",
@@ -66,7 +67,8 @@ def normalize(type_, obj):
     owner = obj.get("owner") or {}
     source = obj.get("source") or {}
     out = {"type": type_, "id": obj.get("id"), "name": obj.get("name"),
-           "owner": owner.get("id"), "owner_name": owner.get("name") or owner.get("displayName")}
+           "owner": owner.get("id"), "owner_name": owner.get("name") or owner.get("displayName"),
+           "created": obj.get("created"), "modified": obj.get("modified") or obj.get("created")}
     if type_ == "access_profile":
         cfg = obj.get("accessRequestConfig") or {}
         out.update(description=obj.get("description") or "", requestable=bool(obj.get("requestable")),
@@ -109,6 +111,26 @@ PATHS = {"description": "/description", "owner": "/owner", "requestable": "/requ
 # Fields inside a parent object that may not exist yet: "add" creates them, "replace" would fail.
 ADD_PATHS = ("approval_schemes", "comments_required", "denial_comments_required")
 CONFIG_PREFIX = "config."  # a source's connector attribute, e.g. "config.host"
+
+
+def changed_later(a, b):
+    """Which of two modification times is later: "first", "second", "same", or None when one is unknown."""
+    def parse(t):
+        try:
+            return datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    pa, pb = (parse(a), parse(b)) if a and b else (None, None)
+    if pa is None or pb is None:
+        return None
+    return "same" if pa == pb else "first" if pa > pb else "second"
+
+
+def value_of(obj, field):
+    """A normalized object's value of a field, including a source's connector settings (config.<key>)."""
+    if field.startswith(CONFIG_PREFIX):
+        return (obj.get("config") or {}).get(field[len(CONFIG_PREFIX):])
+    return obj.get(field)
 
 
 def _pointer(key):

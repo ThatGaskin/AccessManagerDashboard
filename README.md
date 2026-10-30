@@ -247,6 +247,23 @@ The table is colour-coded: **=** same, **≠** different and left alone, **→**
 values are compared item by item (**+** only in the source, **−** only in the target), and the target
 column shows the current value struck through next to the value it will have after the move.
 
+**Scan and compare a whole environment:** the **Compare** tab scans every object of one type — e.g. all
+sources — in two connections and lists each as new, different or the same, with a summary at the top
+and a CSV download of every difference. For sources it also compares each source's entitlement catalog
+(names that exist on only one side). Entitlements are not copied: aggregate the source in the target to
+bring new ones over.
+
+**When was it changed?** Every comparison shows when the object was last changed in each environment and
+marks the side changed more recently. When the target was changed after the source, moving the source's
+values would overwrite that newer change: the object is flagged, and the move's plan and confirmation say
+so.
+
+**History:** the *History* button (per object, and per attribute on the Copy page) fetches the change
+history in both environments on request: the toolkit's own record of what its jobs changed (exact before →
+after, who approved it, link to the job) and the tenant's audit events (who changed the object and when).
+SailPoint audit events usually record who and when but not the old and new values; where an event
+carries them they are shown. Reading audit events needs the `sp:search:read` scope.
+
 Each move is recorded as a job, so it appears on **Jobs** with its audit log, and **Create rollback** on
 that job restores the previous values (or deletes an object the move created). To review many objects
 at once, *Compare all objects of a type* lists every new and different object of a type side by side and

@@ -68,6 +68,7 @@ SEED["access_profiles"].append({
     "enabled": True, "requestable": True,
     "accessRequestConfig": {"commentsRequired": False, "denialCommentsRequired": False, "approvalSchemes": []}})
 SEED["roles"] = []
+SEED["events"] = []  # audit trail: what changed, when, by whom
 SEED["access_requests"] = []
 SEED["approvals"] = [
     {"id": "a1b2c3d4e5f60718293a4b5c6d7e8f90", "owner_id": "2c9180835d2e5168015d32f890ca1582",
@@ -79,6 +80,35 @@ COLLECTIONS = {"access_profile": "access_profiles", "role": "roles", "entitlemen
                "source": "sources", "governance_group": "governance_groups"}
 
 _lock = threading.Lock()
+
+
+def _now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+ACTOR = "API client (toolkit)"
+
+
+def _shown(state, field, value):
+    """A value as the audit trail shows it: names instead of IDs."""
+    def lookup(collection, i):
+        return next((o.get("name") for o in state[collection] if o["id"] == i), i)
+    if field == "owner":
+        return lookup("identities", value) if value else None
+    if field in ("entitlements", "access_profiles", "members"):
+        collection = {"entitlements": "entitlements", "access_profiles": "access_profiles", "members": "identities"}[field]
+        return sorted(lookup(collection, i) for i in value or [])
+    if field == "approval_schemes":
+        return [f"group {lookup('governance_groups', t.split(':', 1)[1])}" if t.startswith("governance_group:") else t
+                for t in value or []]
+    if field in ("management_workgroup", "cluster"):
+        return lookup("governance_groups" if field == "management_workgroup" else "clusters", value) if value else None
+    return value
+
+
+def _event(state, type_, obj, action, changes=None):
+    state["events"].append({"time": _now(), "actor": ACTOR, "action": action, "type": type_, "target_id": obj["id"],
+                            "target_name": obj.get("name"), "changes": changes or {}})
 
 
 class MockTenant(Connector):
@@ -197,8 +227,9 @@ class MockTenant(Connector):
             state = self._state()
             if any(p["name"].lower() == payload["name"].lower() for p in state["access_profiles"]):
                 raise ConnectorError(f"HTTP 400: Access profile '{payload['name']}' already exists", status=400)
-            profile = dict(payload, id=uuid.uuid4().hex, created=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+            profile = dict(payload, id=uuid.uuid4().hex, created=_now(), modified=_now())
             state["access_profiles"].append(profile)
+            _event(state, "access_profile", profile, "Create access profile")
             self._save(state)
         return profile
 
@@ -227,8 +258,9 @@ class MockTenant(Connector):
             state = self._state()
             if any(g["name"].lower() == payload["name"].lower() for g in state["governance_groups"]):
                 raise ConnectorError(f"HTTP 400: Governance group '{payload['name']}' already exists", status=400)
-            group = dict(payload, id=uuid.uuid4().hex, members=[])
+            group = dict(payload, id=uuid.uuid4().hex, members=[], created=_now(), modified=_now())
             state["governance_groups"].append(group)
+            _event(state, "governance_group", group, "Create governance group")
             self._save(state)
         return group
 
@@ -241,7 +273,12 @@ class MockTenant(Connector):
                 raise ConnectorError("Not found", status=404)
             known = {i["id"] for i in state["identities"]}
             problems = [f"{i}: HTTP 404 identity not found" for i in identity_ids if i not in known]
+            old = list(group["members"])
             group["members"] = sorted(set(group["members"]) | ({*identity_ids} & known))
+            if group["members"] != sorted(old):
+                group["modified"] = _now()
+                _event(state, "governance_group", group, "Add governance group members",
+                       {"members": {"old": _shown(state, "members", old), "new": _shown(state, "members", group["members"])}})
             self._save(state)
         return problems
 
@@ -300,6 +337,7 @@ class MockTenant(Connector):
             obj = next((o for o in state[COLLECTIONS[type_]] if o["id"] == object_id), None)
             if obj is None:
                 raise ConnectorError("Not found", status=404)
+            before = self._view(type_, obj, state)
             ops = model.to_patch(changes)
             for op in ops:
                 if op["path"] == "/owner":
@@ -314,6 +352,12 @@ class MockTenant(Connector):
                     for ref in op["value"]:
                         ref["name"] = known.get(ref["id"])
             model.apply_patch(obj, ops)
+            obj["modified"] = _now()
+            after = self._view(type_, obj, state)
+            _event(state, type_, obj, f"Update {model.TYPE_LABELS[type_].lower()}",
+                   {f: {"old": _shown(state, f, model.value_of(before, f)),
+                        "new": _shown(state, f, model.value_of(after, f))}
+                    for f in changes})
             self._save(state)
 
     def create_role(self, payload):
@@ -323,8 +367,9 @@ class MockTenant(Connector):
             state = self._state()
             if any(r["name"].lower() == payload["name"].lower() for r in state["roles"]):
                 raise ConnectorError(f"HTTP 400: Role '{payload['name']}' already exists", status=400)
-            role = dict(payload, id=uuid.uuid4().hex)
+            role = dict(payload, id=uuid.uuid4().hex, created=_now(), modified=_now())
             state["roles"].append(role)
+            _event(state, "role", role, "Create role")
             self._save(state)
         return role
 
@@ -337,8 +382,9 @@ class MockTenant(Connector):
                 raise ConnectorError(f"HTTP 400: Source '{payload['name']}' already exists", status=400)
             if payload.get("cluster") and not any(c["id"] == payload["cluster"]["id"] for c in state["clusters"]):
                 raise ConnectorError("HTTP 400: cluster not found", status=400)
-            source = dict(payload, id=uuid.uuid4().hex)
+            source = dict(payload, id=uuid.uuid4().hex, created=_now(), modified=_now())
             state["sources"].append(source)
+            _event(state, "source", source, "Create source")
             self._save(state)
         return source
 
@@ -351,6 +397,13 @@ class MockTenant(Connector):
             if len(state["sources"]) == before:
                 raise ConnectorError("Not found", status=404)
             self._save(state)
+
+    def object_events(self, type_, object_id, name, limit=100):
+        self._delay()
+        with _lock:
+            events = [dict(e) for e in self._state()["events"]
+                      if e["type"] == type_ and (e["target_id"] == object_id or e.get("target_name") == name)]
+        return sorted(events, key=lambda e: e["time"], reverse=True)[:limit]
 
     def find_clusters(self, ref):
         self._delay()
@@ -385,7 +438,12 @@ class MockTenant(Connector):
             group = next((g for g in state["governance_groups"] if g["id"] == group_id), None)
             if group is None:
                 raise ConnectorError("Not found", status=404)
+            old = list(group["members"])
             group["members"] = [m for m in group["members"] if m not in set(identity_ids)]
+            if group["members"] != old:
+                group["modified"] = _now()
+                _event(state, "governance_group", group, "Remove governance group members",
+                       {"members": {"old": _shown(state, "members", old), "new": _shown(state, "members", group["members"])}})
             self._save(state)
         return []
 

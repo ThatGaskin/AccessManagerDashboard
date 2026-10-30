@@ -5,6 +5,7 @@ group members, environment-specific source settings, and references that cannot 
 Each sandbox has its own IDs (as real tenants do); objects and people are matched by name and email.
 """
 import hashlib
+import time
 
 TEST, PROD = "demo-test", "demo-production"
 FLAVORS = (TEST, PROD)
@@ -23,7 +24,9 @@ ENTITLEMENTS = {
     "Salesforce": ["Standard User", "Sales Manager", "System Administrator", "Read Only"],
     "ServiceNow": ["itil", "admin"],
 }
-TEST_ONLY_ENTITLEMENTS = {"Active Directory": ["Cloud-Admins"]}  # not aggregated in production yet
+TEST_ONLY_ENTITLEMENTS = {"Active Directory": ["Cloud-Admins"],  # not aggregated in production yet
+                          "Salesforce": ["Marketing User"]}
+PROD_ONLY_ENTITLEMENTS = {"Workday": ["Contractor"]}
 
 SOURCES = {
     TEST: {
@@ -126,6 +129,47 @@ ROLES = {  # name: (description, owner, access profiles, requestable)
 }
 
 
+# Change history: (type, name, days ago, who, action, {attribute: (old, new)}). The latest entry is also the
+# object's last-modified time. In production some objects were changed after test, so moving test's
+# values would overwrite a newer production change.
+HISTORY = {
+    TEST: [
+        ("access_profile", "Finance - Read", 12, "alice", "Update access profile",
+         {"description": ("Finance read", "Read access to finance shares")}),
+        ("access_profile", "Finance - Read", 5, "carol", "Update access profile",
+         {"approval_schemes": (["manager"], ["manager", "group Finance Approvers"])}),
+        ("access_profile", "Finance - Read", 2, "alice", "Update access profile",
+         {"owner": ("Alice Admin", "Carol Owner"), "entitlements": (["Finance-Read"], ["Finance-Read", "VPN Users"])}),
+        ("access_profile", "Finance - Write", 10, "carol", "Update access profile", {"comments_required": (False, True)}),
+        ("access_profile", "Sales - Write", 7, "tess", "Update access profile",
+         {"owner": ("Bob Builder", "Tess Tester"), "requestable": (True, False)}),
+        ("source", "Active Directory", 9, "erin", "Update source",
+         {"description": ("Corporate Active Directory", "Corporate AD – all employees and contractors")}),
+        ("source", "Active Directory", 3, "erin", "Update source",
+         {"config.pageSize": ("500", "1000"), "delete_threshold": (10, 20), "config.manageRecycleBin": (False, True)}),
+        ("governance_group", "Finance Approvers", 4, "alice", "Add governance group members",
+         {"members": (["Alice Admin", "Carol Owner"], ["Alice Admin", "Carol Owner", "Frank Finance"])}),
+        ("role", "Finance Analyst", 6, "carol", "Update role",
+         {"access_profiles": (["Finance - Read"], ["Finance - Read", "HR - Read"]), "requestable": (False, True)}),
+    ],
+    PROD: [
+        ("access_profile", "Finance - Read", 40, "alice", "Update access profile",
+         {"description": ("Finance read access", "Finance read")}),
+        ("access_profile", "Finance - Write", 1, "bob", "Update access profile", {"comments_required": (True, False)}),
+        ("access_profile", "Payroll Admin", 2, "frank", "Update access profile", {"enabled": (True, False)}),
+        ("source", "Active Directory", 60, "alice", "Update source",
+         {"description": ("Active Directory", "Corporate Active Directory")}),
+        ("source", "Workday", 1, "alice", "Update source", {"owner": ("Carol Owner", "Frank Finance")}),
+        ("governance_group", "Finance Approvers", 30, "alice", "Update governance group",
+         {"description": ("Approves finance access", "Approves access to finance systems")}),
+    ],
+}
+
+
+def _stamp(days_ago, now):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - days_ago * 86400 - 3600 * (days_ago % 7)))
+
+
 def _id(env, *parts):
     return hashlib.md5("|".join((env,) + parts).encode()).hexdigest()
 
@@ -158,7 +202,8 @@ def seed(flavor):
             source["cluster"] = {"type": "CLUSTER", "id": state["clusters"][0]["id"], "name": cluster_name}
         state["sources"].append(source)
         sources[name] = source
-        names = ENTITLEMENTS[name] + (TEST_ONLY_ENTITLEMENTS.get(name, []) if flavor == TEST else [])
+        extra = TEST_ONLY_ENTITLEMENTS if flavor == TEST else PROD_ONLY_ENTITLEMENTS
+        names = ENTITLEMENTS[name] + extra.get(name, [])
         for ent in names:
             state["entitlements"].append({
                 "id": _id(env, "entitlement", name, ent), "source_id": source["id"], "name": ent,
@@ -196,4 +241,22 @@ def seed(flavor):
             "id": _id(env, "role", name), "name": name, "description": description, "owner": ident(owner),
             "accessProfiles": [{"type": "ACCESS_PROFILE", "id": profiles[a]["id"], "name": a} for a in aps],
             "requestable": requestable, "enabled": True})
+
+    now = time.time()
+    collections = {"access_profile": "access_profiles", "role": "roles", "governance_group": "governance_groups",
+                   "source": "sources"}
+    state["events"] = []
+    for type_, name, days, who, action, changes in HISTORY[flavor]:
+        obj = next(o for o in state[collections[type_]] if o["name"] == name)
+        state["events"].append({"time": _stamp(days, now), "actor": PEOPLE[who][0], "action": action, "type": type_,
+                                "target_id": obj["id"], "target_name": name,
+                                "changes": {f: {"old": old, "new": new} for f, (old, new) in changes.items()}})
+    for type_, collection in collections.items():
+        for obj in state[collection]:
+            obj["created"] = _stamp(120, now)
+            mine = [e["time"] for e in state["events"] if e["target_id"] == obj["id"]]
+            obj["modified"] = max(mine) if mine else _stamp(45, now)
+            state["events"].append({"time": obj["created"], "actor": "Alice Admin",
+                                    "action": f"Create {type_.replace('_', ' ')}", "type": type_,
+                                    "target_id": obj["id"], "target_name": obj["name"], "changes": {}})
     return state
