@@ -83,6 +83,15 @@ CREATE TABLE IF NOT EXISTS reports (
     created_at     TEXT NOT NULL,
     finished_at    TEXT
 );
+
+-- Attributes a person marked as environment-specific (1) or not (0), overriding the built-in rules.
+CREATE TABLE IF NOT EXISTS env_marks (
+    object_type   TEXT NOT NULL,
+    attribute     TEXT NOT NULL,
+    env_specific  INTEGER NOT NULL,
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY (object_type, attribute)
+);
 """
 
 

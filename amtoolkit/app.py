@@ -437,6 +437,16 @@ def create_app(data_dir, *, allowed_hosts=None):
                                          (data.get("name") or "").strip() or None)
         return jsonify(id=job_id), 201
 
+    @app.get("/api/env-marks")
+    def list_env_marks():
+        return jsonify(toolkit.env_marks())
+
+    @app.put("/api/env-marks")
+    def set_env_mark():
+        data = body()
+        return jsonify(toolkit.mark_env_specific(data.get("object_type", ""), data.get("attribute", ""),
+                                                 data.get("env_specific")))
+
     # ------------------------------------------------------------------ reports (experimental, read-only)
     @app.get("/api/reports")
     def list_reports():

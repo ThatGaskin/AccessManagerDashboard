@@ -20,7 +20,7 @@ Rollback restores the previous values of updated objects and deletes the objects
 """
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..connectors import model
 from ..connectors.base import AuthError, ConfigError, ConnectorError
@@ -43,10 +43,11 @@ class Attr:
     required: bool = False  # needed to create the object
     env_specific: bool = False  # kept in the target unless named explicitly
     secret: bool = False  # never copied
+    marked: bool = False  # env_specific was set by a person (see ENV_MARKS), not by the built-in rules
 
     def to_dict(self):
         return {"name": self.name, "label": self.label, "kind": self.kind, "required": self.required,
-                "env_specific": self.env_specific, "secret": self.secret}
+                "env_specific": self.env_specific, "secret": self.secret, "marked": self.marked}
 
 
 ATTRS = {
@@ -98,12 +99,39 @@ def config_attr(key):
     return Attr(CONFIG + key, key, "config", env_specific=env, secret=secret)
 
 
-def attr_specs(type_, obj=None):
-    """The copyable attributes of a type; for sources also one per connector setting of `obj`."""
+# Attributes people marked as environment-specific (True) or not (False) on the Compare and Copy pages,
+# per object type: {type: {attribute: bool}}. They override the built-in classification everywhere —
+# comparisons, default selections and plans. Loaded from the store and replaced whenever a mark changes.
+ENV_MARKS = {}
+
+
+def set_env_marks(marks):
+    global ENV_MARKS
+    ENV_MARKS = {t: dict(attrs) for t, attrs in (marks or {}).items()}
+
+
+def with_mark(type_, spec):
+    """The attribute with a person's environment-specific mark applied. Secrets cannot be marked."""
+    mark = ENV_MARKS.get(type_, {}).get(spec.name)
+    if mark is None or spec.secret or mark == spec.env_specific:
+        return spec
+    return replace(spec, env_specific=mark, marked=True)
+
+
+def builtin_spec(type_, name):
+    """An attribute as the built-in rules classify it, or None when the type has no such attribute."""
+    if type_ == "source" and name.startswith(CONFIG) and len(name) > len(CONFIG):
+        return config_attr(name[len(CONFIG):])
+    return next((a for a in ATTRS.get(type_, ()) if a.name == name), None)
+
+
+def attr_specs(type_, obj=None, marks=True):
+    """The copyable attributes of a type; for sources also one per connector setting of `obj`. With
+    `marks`, environment-specific marks people set are applied."""
     specs = list(ATTRS[type_])
     if type_ == "source" and obj:
         specs += [config_attr(k) for k in sorted(obj.get("config") or {})]
-    return {a.name: a for a in specs}
+    return {a.name: with_mark(type_, a) if marks else a for a in specs}
 
 
 def default_selection(specs):

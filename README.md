@@ -281,6 +281,12 @@ search DN, client ID…) are left as they are in the target, and are not copied 
 you tick them (or give a target value in *Use instead*). **Secrets** (passwords, client
 secrets, tokens) are never copied: the API does not return them.
 
+**Mark your own.** Next to any compared attribute, *mark environment-specific* makes the toolkit treat it
+like the ones above — for that object type, in every comparison, copy and plan from then on (e.g. a
+description that is supposed to say "PROD"). *not environment-specific* does the opposite, e.g. for a
+connection setting the toolkit guessed wrong. Marks are saved in the toolkit's database; marking an
+attribute back the way the toolkit classifies it removes the mark. Secrets cannot be marked.
+
 Attributes: access profiles — `description`, `owner`, `requestable`, `enabled`, `approval_schemes`,
 `comments_required`, `denial_comments_required`, `entitlements`; roles — `description`, `owner`,
 `requestable`, `enabled`, `access_profiles`; governance groups — `description`, `owner`, `members`;

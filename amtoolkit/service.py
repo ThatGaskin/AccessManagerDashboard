@@ -14,7 +14,7 @@ from .actions import ACTIONS, Plan, get_action, msg
 from .connectors import ConnectionManager, KINDS
 from .db import Database
 from .engine import Engine, JobStateError, plan_context, plan_item, recheck_duplicates
-from .actions.copy import COPY_TYPES
+from .actions.copy import COPY_TYPES, builtin_spec, set_env_marks, with_mark
 from .compare import CompareRunner, compare_one
 from .connectors import AuthError, ConfigError, ConnectorError, model
 from .reports import REPORTS, ReportRunner
@@ -40,6 +40,7 @@ class Toolkit:
         self.engine.recover()
         self.reports = ReportRunner(self.db, self.connections)
         self.compare = CompareRunner(self.connections)
+        set_env_marks(self.store.env_marks())
 
     # ---------------------------------------------------------------- connections
     def connection_view(self, conn):
@@ -429,6 +430,31 @@ class Toolkit:
             elif row["op"] == "delete" and target.get("id") == object_id:
                 out.append(dict(base, change="deleted", changes={}))
         return out
+
+    def mark_env_specific(self, object_type, attribute, env_specific):
+        """Marks an attribute of a type as environment-specific (kept in the target unless ticked) or not,
+        for every comparison, copy and plan from now on. Marking it the way the built-in rules classify it
+        removes the mark."""
+        if object_type not in COPY_TYPES:
+            raise ValueError("Choose an object type: " + ", ".join(COPY_TYPES))
+        if not isinstance(env_specific, bool):
+            raise ValueError("env_specific must be true or false")
+        spec = builtin_spec(object_type, str(attribute or "")) if len(str(attribute or "")) <= 200 else None
+        if spec is None:
+            raise ValueError(f"Unknown attribute '{attribute}' for {model.TYPE_LABELS[object_type].lower()}s")
+        if spec.secret:
+            raise ValueError(f"'{spec.label}' is a secret; secrets are never copied")
+        self.store.set_env_mark(object_type, spec.name, None if env_specific == spec.env_specific else env_specific)
+        set_env_marks(self.store.env_marks())
+        log.info("Attribute %s of %ss marked %senvironment-specific", spec.name, object_type,
+                 "" if env_specific else "not ")
+        spec = with_mark(object_type, spec)
+        return {"object_type": object_type, "attribute": spec.name, "env_specific": spec.env_specific,
+                "marked": spec.marked}
+
+    def env_marks(self):
+        return [{"object_type": t, "attribute": a, "env_specific": v}
+                for t, attrs in sorted(self.store.env_marks().items()) for a, v in sorted(attrs.items())]
 
     def compare_csv(self, compare_id):
         """A finished comparison as CSV: one line per differing attribute, entitlement or missing object."""
